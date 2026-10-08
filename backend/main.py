@@ -8,6 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from transformers.audio_utils import load_audio
 
 from .asr import ASREngine, resample
+from .browser import Browser
 from .config import ROOT, settings
 from .llm import LLM
 from .session import Models, VoiceSession
@@ -39,8 +40,24 @@ async def lifespan(app: FastAPI):
                       transcribe=lambda audio: asr.transcribe(resample(audio, TTS_RATE, asr.sample_rate))),
         llm=LLM(settings.ollama_host, settings.ollama_api_key, settings.llm_model, settings.llm_think),
     )
+    if settings.browser_enabled:
+        browser = Browser(settings.website_url, settings.browser_headless, ROOT / settings.browser_profile_dir)
+        try:
+            await browser.start()
+            app.state.models.browser = browser
+            app.state.models.browser_llm = LLM(
+                settings.ollama_host, settings.ollama_api_key,
+                settings.browser_llm_model or settings.llm_model, settings.browser_llm_think,
+            )
+        except Exception as exc:
+            # Keep the voice agent usable without website tools
+            log.error("Browser failed to start, website tools disabled: %s", str(exc).splitlines()[0])
+            log.error("If Chromium is missing system libraries, run: sudo .venv/bin/playwright install-deps chromium")
+            await browser.close()
     log.info("Ready")
     yield
+    if app.state.models.browser:
+        await app.state.models.browser.close()
 
 
 app = FastAPI(title="Voice Agent", lifespan=lifespan)

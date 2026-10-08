@@ -110,8 +110,46 @@ function onEvent(msg) {
       thinking = false;
       add("err", msg.message);
       break;
+    case "browser_task":
+      onBrowserTask(msg);
+      break;
+    case "browser_step":
+      onBrowserStep(msg);
+      break;
   }
 }
+
+// ---------- Browser agent panel ----------
+
+function onBrowserTask(msg) {
+  $("browser").hidden = false;
+  const status = $("bstatus");
+  status.className = "badge " + (msg.status === "started" ? "running" : msg.status);
+  status.textContent = msg.status === "started" ? "running" : msg.status;
+  $("bcancel").hidden = msg.status !== "started";
+  if (msg.status === "started") {
+    $("btask").textContent = `#${msg.id} ${msg.text}`;
+    $("steps").innerHTML = "";
+    add("tool", `🌐 task #${msg.id} started: ${msg.text}`);
+  } else {
+    add("tool", `🌐 task #${msg.id} ${msg.status}${msg.text ? ": " + msg.text : ""}`);
+  }
+}
+
+function onBrowserStep(msg) {
+  const li = document.createElement("li");
+  li.textContent = `${msg.action} ${JSON.stringify(msg.args)} → ${msg.result}`;
+  $("steps").appendChild(li);
+  $("steps").scrollTop = $("steps").scrollHeight;
+  if (msg.screenshot) {
+    $("bshot").src = "data:image/jpeg;base64," + msg.screenshot;
+    $("bshot").hidden = false;
+  }
+}
+
+$("bcancel").onclick = () => {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "cancel_task" }));
+};
 
 // ---------- Playback ----------
 

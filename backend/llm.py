@@ -18,3 +18,9 @@ class LLM:
         )
         async for chunk in response:
             yield chunk.message
+
+    async def chat(self, messages: list, tools: list[dict]) -> Message:
+        response = await self.client.chat(
+            model=self.model, messages=messages, tools=tools or None, think=self.think
+        )
+        return response.message

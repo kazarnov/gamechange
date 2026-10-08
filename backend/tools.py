@@ -1,7 +1,11 @@
-"""Tools the LLM can call. Website actions (Playwright) will be registered here later.
+"""Tools the voice assistant's LLM can call.
 
 Register a tool with @tool, giving it a JSON-schema for its parameters. Tools may be
-sync or async and should return something JSON-serializable (or a string).
+sync or async and should return something JSON-serializable (or a string). A tool that
+declares a `session` parameter receives the current VoiceSession (not part of the schema).
+
+Website actions are not listed here one by one: the assistant delegates a whole task to
+the browser agent (backend/browser_agent.py), which has its own tools and skills.
 """
 
 import asyncio
@@ -30,16 +34,19 @@ def tool(name: str, description: str, parameters: dict | None = None):
     return wrap
 
 
-def schemas() -> list[dict]:
-    return [schema for _, schema in _REGISTRY.values()]
+def schemas(exclude: set[str] = frozenset()) -> list[dict]:
+    return [schema for name, (_, schema) in _REGISTRY.items() if name not in exclude]
 
 
-async def run(name: str, arguments: dict) -> str:
+async def run(name: str, arguments: dict, **context) -> str:
+    """`context` values (e.g. session=...) are passed to tools that declare them."""
     if name not in _REGISTRY:
         return json.dumps({"error": f"unknown tool {name!r}"})
     fn, _ = _REGISTRY[name]
+    params = inspect.signature(fn).parameters
+    arguments = {k: v for k, v in arguments.items() if k not in context}
     try:
-        result = fn(**arguments)
+        result = fn(**arguments, **{k: v for k, v in context.items() if k in params})
         if inspect.isawaitable(result):
             result = await result
     except Exception as exc:
@@ -52,7 +59,7 @@ async def run(name: str, arguments: dict) -> str:
 
 @tool("get_current_time", "Get the current local date and time.")
 def get_current_time():
-    return {"now": datetime.now().strftime("%A %d %B %Y, %H:%M")}
+    return {"now": datetime.now().strftime("%A %d %B %Y, %I:%M %p")}
 
 
 @tool(
@@ -67,3 +74,34 @@ def get_current_time():
 async def wait(seconds: float):
     await asyncio.sleep(min(float(seconds), 10))
     return {"waited": seconds}
+
+
+# --- Website (delegated to the browser agent) -------------------------------------
+
+BROWSER_TOOLS = {"browser_task", "browser_task_status", "cancel_browser_task"}
+
+
+@tool(
+    "browser_task",
+    "Start a task on the website in the web browser: navigating, clicking, filling forms, "
+    "or reading information from pages. It runs in the background and you are told the result "
+    "when it finishes. Give a complete, self-contained instruction including every detail the "
+    "user gave.",
+    {
+        "type": "object",
+        "properties": {"instruction": {"type": "string", "description": "What to do, in plain language"}},
+        "required": ["instruction"],
+    },
+)
+async def browser_task(instruction: str, session):
+    return await session.start_browser_task(instruction)
+
+
+@tool("browser_task_status", "Check progress of the running browser task.")
+def browser_task_status(session):
+    return session.browser_task_status()
+
+
+@tool("cancel_browser_task", "Stop the running browser task.")
+async def cancel_browser_task(session):
+    return await session.cancel_browser_task()

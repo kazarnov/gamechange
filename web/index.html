@@ -45,6 +45,16 @@
   .err { align-self: center; font-size: 13px; color: var(--danger); }
   form { display: flex; gap: 8px; }
   input[type=text] { flex: 1; min-width: 0; font: inherit; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--text); }
+  #browser { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+  #browser .head { display: flex; align-items: center; gap: 8px; justify-content: space-between; flex-wrap: wrap; font-size: 13px; }
+  #browser .task { font-weight: 600; overflow-wrap: anywhere; }
+  #browser .badge { font-size: 12px; padding: 2px 8px; border-radius: 99px; background: var(--line); color: var(--muted); }
+  #browser .badge.running { background: var(--accent); color: #fff; }
+  #browser .badge.done { background: #3aa65b; color: #fff; }
+  #browser .badge.failed, #browser .badge.cancelled { background: var(--danger); color: #fff; }
+  #browser img { width: 100%; max-height: 320px; object-fit: contain; object-position: top; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+  #steps { margin: 0; padding-left: 20px; font: 12px/1.5 ui-monospace, monospace; color: var(--muted); max-height: 120px; overflow-y: auto; }
+  #steps li { overflow-wrap: anywhere; }
   #meter { width: 80px; height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
   #meter > div { height: 100%; width: 0; background: #3aa65b; transition: width .05s; }
 </style>
@@ -64,6 +74,15 @@
       <input type="checkbox" id="bargein" checked> Allow interrupting by voice
     </label>
   </div>
+
+  <section id="browser" hidden>
+    <div class="head">
+      <span>Browser · <span class="task" id="btask"></span></span>
+      <span><span class="badge" id="bstatus"></span> <button id="bcancel" type="button">Cancel task</button></span>
+    </div>
+    <img id="bshot" alt="Screenshot of the browser" hidden>
+    <ol id="steps"></ol>
+  </section>
 
   <div id="log" aria-live="polite"></div>
 

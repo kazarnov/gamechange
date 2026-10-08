@@ -46,6 +46,17 @@ class Settings(BaseSettings):
     tts_ref_audio: str = ""
     tts_ref_text: str = ""
 
+    # Browser agent (Playwright)
+    browser_enabled: bool = True
+    website_url: str = "https://demo.playwright.dev/todomvc/"
+    browser_headless: bool = False  # forced on when there is no display
+    browser_profile_dir: str = "browser-profile"  # cookies/logins persist here
+    browser_llm_model: str = ""  # empty = same as LLM_MODEL
+    browser_llm_think: bool | Literal["low", "medium", "high"] = "low"
+    browser_max_steps: int = 25
+    browser_screenshots: bool = True  # send a screenshot to the web UI after each step
+    skills_dir: str = "skills"
+
     # VAD / turn taking
     vad_threshold: float = 0.5
     vad_min_silence_ms: int = 600
