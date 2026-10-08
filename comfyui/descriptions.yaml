@@ -1,0 +1,8 @@
+# What each ComfyUI workflow is for. The voice assistant sees these lines, so it can pick the
+# right workflow and know its quirks. One line per workflow: <name>: <description>.
+# Workflows the assistant adds get a line here automatically; workflows without a line are
+# described from their inputs ("Text to video.", "Image to video.", ...).
+z_image_turbo: Text to image (Z-Image Turbo). Fast, about 8 seconds; the default for new pictures.
+flux2_klein_edit: Edits a picture following the prompt (FLUX.2 Klein), about 7 seconds. Keeps the picture's aspect ratio; megapixels sets the size.
+wan_t2v: Text to video (Wan 2.2 5B), about 5 minutes. length is the number of frames and must be 4n+1 (at 24 fps, 49 is about 2 s, 81 about 3.4 s, 121 about 5 s); fewer frames render faster.
+wan_i2v: Animates a picture into a video following the prompt (Wan 2.2 5B), about 5 minutes. Same length rules as wan_t2v.

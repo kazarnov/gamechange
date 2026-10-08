@@ -57,6 +57,13 @@ class Settings(BaseSettings):
     browser_screenshots: bool = True  # send a screenshot to the web UI after each step
     skills_dir: str = "skills"
 
+    # Pictures and videos: the ComfyUI manager API on the RunPod pod (comfyui/API.md)
+    comfyui_url: str = ""  # https://<pod-id>-8000.proxy.runpod.net; empty = off
+    comfyui_api_key: str = ""  # MANAGER_API_KEY from comfyui/pod.env
+    comfyui_descriptions: str = "comfyui/descriptions.yaml"  # what each workflow is for
+    comfyui_timeout_minutes: int = 30  # give up waiting for one generation after this
+    media_dir: str = "media"  # generated and attached files, served at /media
+
     # VAD / turn taking
     vad_threshold: float = 0.5
     vad_min_silence_ms: int = 600

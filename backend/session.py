@@ -6,12 +6,18 @@ Wire protocol
     json:   {"type": "text", "text": "..."}   typed user message
             {"type": "interrupt"}              stop the assistant
             {"type": "cancel_task"}            stop the running browser task
+            {"type": "upload", "name": "...", "data": "data:image/png;base64,..."}
+                                               attach an image/video/audio file
+            {"type": "upload", "name": "x.json", "workflow": {...}}
+                                               attach a ComfyUI workflow file
             {"type": "reset"}                  clear conversation history
   server -> client
     binary: 4-byte little-endian turn id + PCM16 mono 24 kHz assistant speech
     json:   ready | vad | transcript | assistant_delta | assistant_done |
             tool_call | tool_result | interrupt | error |
-            browser_task (started/done/failed/cancelled) | browser_step
+            browser_task (started/done/failed/cancelled) | browser_step |
+            media_job (generate/install: started/running/done/failed/cancelled) |
+            media (a generated or attached file, served at /media/...)
 """
 
 import asyncio
@@ -28,8 +34,10 @@ from . import tools
 from .asr import ASREngine, StreamingTranscription
 from .browser import Browser
 from .browser_agent import BrowserAgent
+from .comfyui import ComfyClient, ComfyError
 from .config import ROOT, settings
 from .llm import LLM
+from .media import MediaSession
 from .skills import catalogue, load_skills
 from .tts import SAMPLE_RATE as TTS_RATE
 from .tts import SentenceChunker, TTSEngine
@@ -45,6 +53,7 @@ class Models:
     llm: LLM
     browser: Browser | None = None
     browser_llm: LLM | None = None
+    comfy: ComfyClient | None = None
 
 
 @dataclass
@@ -64,6 +73,7 @@ class VoiceSession:
         self.loop = asyncio.get_running_loop()
         self.vad = TurnDetector(settings.vad_threshold, settings.vad_min_silence_ms,
                                 settings.vad_min_speech_ms, settings.vad_preroll_ms)
+        self.media = self.new_media()
         self.messages: list = [{"role": "system", "content": self.system_prompt()}]
         self.send_lock = asyncio.Lock()
         self.turn = 0
@@ -75,7 +85,14 @@ class VoiceSession:
         self.user_speaking = False
         self.job: BrowserJob | None = None
         self.job_count = 0
-        self.notes: list[str] = []  # events (e.g. task results) the LLM hasn't seen yet
+        self.notes: list[str] = []  # events (task results, uploads) the LLM hasn't seen yet
+        self.announce = False  # a note needs a spoken reply even if the user says nothing
+
+    def new_media(self) -> MediaSession | None:
+        if not self.m.comfy:
+            return None
+        return MediaSession(self.m.comfy, ROOT / settings.media_dir, settings.comfyui_timeout_minutes * 60,
+                            self.try_send, self.add_note, lambda text: self.add_note(text, announce=False))
 
     def system_prompt(self) -> str:
         prompt = settings.system_prompt
@@ -87,6 +104,21 @@ class VoiceSession:
                 "its result. If the user asks how it is going, use browser_task_status; if they want to "
                 "stop it, use cancel_browser_task. The browser agent has these skills:\n"
                 + catalogue(load_skills(ROOT / settings.skills_dir))
+            )
+        if self.m.comfy:
+            prompt += (
+                "\n\nYou can make pictures and videos with ComfyUI workflows by calling generate_media. It runs "
+                "in the background: say one short sentence such as 'Sure, making it now', and never say it is "
+                "ready until you are told. When it is, it is already on the user's screen, so just say so "
+                "briefly. Pictures take seconds; videos take several minutes, so tell the user. Write the prompt "
+                "in English as a rich visual description (subject, setting, style, lighting, camera, and motion "
+                "for videos), expanding on what the user asked for. Every picture, video and attached file has a "
+                "number the user can refer to; to change or animate a picture, use a workflow that needs an image "
+                "and pass its number (the latest one is used by default). Use list_media_workflows when asked "
+                "which workflows exist, media_status for progress, and cancel_media to stop one. To add a "
+                "workflow, find it with search_workflow_templates (or use a workflow file the user attached, or "
+                "a URL they give), confirm the choice with the user, then call add_media_workflow. "
+                "Workflows on the pod:\n" + self.m.comfy.catalogue()
             )
         return prompt
 
@@ -129,6 +161,8 @@ class VoiceSession:
         finally:
             await self.interrupt(notify=False)
             await self.cancel_browser_task()
+            if self.media:
+                await self.media.close()
             if self.stream:
                 await asyncio.to_thread(self.stream.finish)
 
@@ -142,11 +176,27 @@ class VoiceSession:
                 await self.interrupt()
             case "cancel_task":
                 await self.cancel_browser_task()
+            case "upload":
+                await self.on_upload(msg)
             case "reset":
                 await self.interrupt()
                 await self.cancel_browser_task()
+                if self.media:
+                    await self.media.close()
+                    self.media = self.new_media()
                 self.notes.clear()
+                self.announce = False
                 self.messages = [{"role": "system", "content": self.system_prompt()}]
+
+    async def on_upload(self, msg: dict):
+        if not self.media:
+            await self.send(type="error", message="Attachments are used for image generation, "
+                                                  "which is off (set COMFYUI_URL).")
+            return
+        try:
+            await self.media.upload(msg.get("name", ""), msg.get("data"), msg.get("workflow"))
+        except ComfyError as exc:
+            await self.send(type="error", message=f"Upload failed: {exc}")
 
     # --- user speech --------------------------------------------------------------
 
@@ -229,9 +279,13 @@ class VoiceSession:
 
     async def respond(self, user_text: str | None, turn: int):
         """Answers user_text, or with None just reacts to pending notes (task results)."""
+        if self.m.comfy:
+            self.m.comfy.maybe_refresh()  # the workflow list in the prompt; picked up next turn
+        self.messages[0]["content"] = self.system_prompt()
         for note in self.notes:
             self.messages.append({"role": "system", "content": note})
         self.notes.clear()
+        self.announce = False
         if user_text:
             self.messages.append({"role": "user", "content": user_text})
         sentences: asyncio.Queue[str | None] = asyncio.Queue()
@@ -242,7 +296,8 @@ class VoiceSession:
             for _ in range(settings.llm_max_tool_rounds):
                 content, calls, chunker = "", [], SentenceChunker()
                 try:
-                    exclude = set() if self.m.browser else tools.BROWSER_TOOLS
+                    exclude = (set() if self.m.browser else tools.BROWSER_TOOLS) | \
+                              (set() if self.media else tools.MEDIA_TOOLS)
                     async for msg in self.m.llm.stream(self.messages, tools.schemas(exclude)):
                         if msg.content:
                             if first_token:
@@ -354,11 +409,8 @@ class VoiceSession:
             status = "failed"
         log.info("browser task %d %s in %.1f s: %s", job.id, status, time.monotonic() - job.started, job.result)
         await self.try_send(type="browser_task", id=job.id, status=status, text=job.result)
-        self.notes.append(
-            f"Browser task {job.id} ({job.instruction!r}) has finished. Result: {job.result}\n"
-            "Tell the user the outcome in one or two short spoken sentences."
-        )
-        self.maybe_announce()
+        self.add_note(f"Browser task {job.id} ({job.instruction!r}) has finished. Result: {job.result}\n"
+                      "Tell the user the outcome in one or two short spoken sentences.")
 
     def browser_task_status(self) -> dict:
         job = self.job
@@ -380,9 +432,16 @@ class VoiceSession:
             pass
         return {"task_id": job.id, "status": "cancelled"}
 
+    def add_note(self, text: str, announce: bool = True):
+        """Tells the LLM about an event on its next turn; announce=True also makes it speak up."""
+        self.notes.append(text)
+        if announce:
+            self.announce = True
+            self.maybe_announce()
+
     def maybe_announce(self):
         """Starts a response for pending notes once nobody is talking."""
-        if not self.notes or self.user_speaking:
+        if not self.announce or self.user_speaking:
             return  # the user's next turn will pick the notes up
         if self.response and not self.response.done():
             return  # respond() calls us again when it ends

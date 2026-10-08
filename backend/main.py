@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -9,6 +10,7 @@ from transformers.audio_utils import load_audio
 
 from .asr import ASREngine, resample
 from .browser import Browser
+from .comfyui import ComfyClient, ComfyError
 from .config import ROOT, settings
 from .llm import LLM
 from .session import Models, VoiceSession
@@ -18,6 +20,19 @@ from .tts import TTSEngine
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("voice-agent")
+
+MEDIA_DIR = ROOT / settings.media_dir
+MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+
+
+async def check_comfy(comfy: ComfyClient):
+    try:
+        await comfy.refresh()
+        log.info("ComfyUI at %s: %s", comfy.base_url,
+                 ", ".join(f"{w.name}{'' if w.ready else ' (installing)'}" for w in comfy.workflows.values())
+                 or "no workflows")
+    except ComfyError as exc:
+        log.warning("ComfyUI at %s: %s (generation tools will report errors until it is up)", comfy.base_url, exc)
 
 
 @asynccontextmanager
@@ -54,10 +69,18 @@ async def lifespan(app: FastAPI):
             log.error("Browser failed to start, website tools disabled: %s", str(exc).splitlines()[0])
             log.error("If Chromium is missing system libraries, run: sudo .venv/bin/playwright install-deps chromium")
             await browser.close()
+    if settings.comfyui_url:
+        comfy = ComfyClient(settings.comfyui_url, settings.comfyui_api_key, ROOT / settings.comfyui_descriptions)
+        app.state.models.comfy = comfy
+        app.state.comfy_check = asyncio.create_task(check_comfy(comfy))  # don't hold up startup
+    else:
+        log.info("COMFYUI_URL is not set: picture/video generation is off")
     log.info("Ready")
     yield
     if app.state.models.browser:
         await app.state.models.browser.close()
+    if app.state.models.comfy:
+        await app.state.models.comfy.close()
 
 
 app = FastAPI(title="Voice Agent", lifespan=lifespan)
@@ -65,7 +88,9 @@ app = FastAPI(title="Voice Agent", lifespan=lifespan)
 
 @app.get("/health")
 def health():
-    return {"ok": True, "llm": settings.llm_model, "asr_mode": settings.asr_mode}
+    comfy = app.state.models.comfy
+    return {"ok": True, "llm": settings.llm_model, "asr_mode": settings.asr_mode,
+            "comfyui": "off" if not comfy else (comfy.error or f"ok, {len(comfy.workflows)} workflows")}
 
 
 @app.websocket("/ws")
@@ -76,4 +101,5 @@ async def ws_endpoint(ws: WebSocket):
     log.info("client disconnected")
 
 
+app.mount("/media", StaticFiles(directory=MEDIA_DIR), name="media")
 app.mount("/", StaticFiles(directory=ROOT / "web", html=True), name="web")

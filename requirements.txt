@@ -11,3 +11,4 @@ numpy
 soundfile
 playwright>=1.50
 pyyaml
+httpx

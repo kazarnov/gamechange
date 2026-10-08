@@ -4,3 +4,6 @@ voices/
 __pycache__/
 key.txt
 browser-profile/
+media/
+comfyui/pod.env
+comfyui/outputs/
