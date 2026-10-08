@@ -1,0 +1,5 @@
+.venv/
+.env
+voices/
+__pycache__/
+key.txt
