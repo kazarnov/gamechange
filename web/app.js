@@ -1,18 +1,16 @@
+// The test console: every event of the protocol shown as it comes, tool calls included.
+import { VoiceLink, acceptFiles, mediaElement as fileElement, uploadFile } from "./voice.js";
+
 const $ = (id) => document.getElementById(id);
 const log = $("log");
 
-let ws = null;
-let audioCtx = null;      // playback + capture context
-let micNode = null, micStream = null, analyser = null;
-let micOn = false;
-let workletLoaded = false;
-let ttsRate = 24000;
-let minTurn = 0;          // drop audio from turns older than this
-let nextPlayTime = 0;
-let sources = [];
+const link = new VoiceLink({
+  onEvent,
+  onClose: () => { add("sys", "disconnected"); micOff(); },
+});
+link.bargeIn = () => $("bargein").checked;
 let partialEl = null;     // live (non-final) user transcript bubble
 let botEl = null, botTurn = -1;
-let userSpeaking = false, thinking = false;
 
 // ---------- UI helpers ----------
 
@@ -25,51 +23,16 @@ function add(cls, text) {
   return el;
 }
 
-function playing() {
-  return audioCtx && audioCtx.currentTime < nextPlayTime;
-}
-
 function updateState() {
-  const dot = $("dot"), state = $("state");
-  let s = "disconnected";
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    s = userSpeaking ? "hearing" : playing() ? "speaking" : thinking ? "thinking" : micOn ? "listening" : "connected";
-  }
-  dot.className = "dot " + s;
-  state.textContent = s;
+  $("dot").className = "dot " + link.state;
+  $("state").textContent = link.state;
 }
 setInterval(updateState, 100);
-
-// ---------- WebSocket ----------
-
-function connect() {
-  return new Promise((resolve, reject) => {
-    const proto = location.protocol === "https:" ? "wss" : "ws";
-    ws = new WebSocket(`${proto}://${location.host}/ws`);
-    ws.binaryType = "arraybuffer";
-    ws.onopen = () => resolve();
-    ws.onerror = () => reject(new Error("WebSocket error"));
-    ws.onclose = () => { add("sys", "disconnected"); stopMic(); ws = null; };
-    ws.onmessage = (ev) => {
-      if (typeof ev.data === "string") onEvent(JSON.parse(ev.data));
-      else onAudio(ev.data);
-    };
-  });
-}
-
-async function ensureConnected() {
-  if (ws && ws.readyState === WebSocket.OPEN) return;
-  await connect();
-}
 
 function onEvent(msg) {
   switch (msg.type) {
     case "ready":
-      ttsRate = msg.tts_sample_rate;
       add("sys", `connected · ASR ${msg.asr_mode}`);
-      break;
-    case "vad":
-      userSpeaking = msg.speaking;
       break;
     case "transcript":
       if (!msg.final) {
@@ -78,18 +41,16 @@ function onEvent(msg) {
       } else {
         if (partialEl) partialEl.remove();
         partialEl = null;
-        if (msg.text) { add("user", msg.text); thinking = true; }
+        if (msg.text) add("user", msg.text);
       }
       log.scrollTop = log.scrollHeight;
       break;
     case "assistant_delta":
-      thinking = false;
       if (!botEl || botTurn !== msg.turn) { botEl = add("bot", ""); botTurn = msg.turn; }
       botEl.textContent += msg.text;
       log.scrollTop = log.scrollHeight;
       break;
     case "assistant_done":
-      thinking = false;
       botEl = null;
       break;
     case "tool_call":
@@ -100,14 +61,10 @@ function onEvent(msg) {
       add("tool", `← ${msg.result}`);
       break;
     case "interrupt":
-      minTurn = msg.turn;
-      stopPlayback();
       if (botEl && msg.was_speaking) botEl.classList.add("cut");
       botEl = null;
-      thinking = false;
       break;
     case "error":
-      thinking = false;
       add("err", msg.message);
       break;
     case "browser_task":
@@ -121,6 +78,19 @@ function onEvent(msg) {
       break;
     case "media":
       onMedia(msg);
+      break;
+    case "draft":
+      onDraft(msg);
+      break;
+    case "flowai":
+      add(msg.error ? "err" : "sys", msg.error ? `FlowAI: ${msg.error}`
+        : `FlowAI · ${msg.user.name} · ${msg.accounts.map((a) => a.label).join(", ") || "no accounts"}`);
+      break;
+    case "saved":
+      add("tool", `💾 draft ${msg.draft} v${msg.version} → FlowAI post ${msg.post} (${msg.status}${msg.when ? ", " + msg.when : ""})`);
+      break;
+    case "approval":
+      onApproval(msg);
       break;
   }
 }
@@ -185,23 +155,12 @@ setInterval(() => {
 }, 1000);
 
 function mediaElement(msg) {
-  if (msg.kind === "image") {
-    const a = document.createElement("a");
-    a.href = msg.url; a.target = "_blank";
-    const img = document.createElement("img");
-    img.src = msg.url; img.alt = msg.prompt || msg.name;
-    img.onload = () => { log.scrollTop = log.scrollHeight; };
-    a.appendChild(img);
-    return a;
-  }
-  if (msg.kind === "video" || msg.kind === "audio") {
-    const m = document.createElement(msg.kind);
-    m.src = msg.url; m.controls = true; m.loop = true; m.preload = "metadata";
-    if (msg.kind === "video") { m.muted = true; m.autoplay = true; m.playsInline = true; }
-    return m;
-  }
+  const el = fileElement({ kind: msg.kind, url: msg.url, name: msg.name, alt: msg.prompt });
+  if (msg.kind !== "image") return el;
+  el.onload = () => { log.scrollTop = log.scrollHeight; };
   const a = document.createElement("a");
-  a.href = msg.url; a.target = "_blank"; a.textContent = `📄 ${msg.name}`;
+  a.href = msg.url; a.target = "_blank";
+  a.appendChild(el);
   return a;
 }
 
@@ -221,80 +180,86 @@ function onMedia(msg) {
   log.scrollTop = log.scrollHeight;
 }
 
+// ---------- Approvals (scheduling) ----------
+
+const approvalCards = {};
+
+function onApproval(msg) {
+  const el = approvalCards[msg.id] || (approvalCards[msg.id] = add("tool", ""));
+  el.textContent = `🗓 ${msg.text}` + (msg.status === "waiting" ? " " : ` · ${msg.status}${msg.detail ? ": " + msg.detail : ""}`);
+  if (msg.status !== "waiting") return;
+  for (const [label, type] of [["Approve", "approve"], ["Decline", "decline"]]) {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.onclick = () => link.send({ type, id: msg.id });
+    el.append(" ", b);
+  }
+}
+
+// ---------- Post drafts ----------
+
+const draftCards = {};  // draft id -> its latest card; older versions stay above, dimmed
+
+function onDraft(msg) {
+  if (draftCards[msg.id]) draftCards[msg.id].classList.add("old");
+  const el = draftCards[msg.id] = add("bot draft", "");
+
+  const head = document.createElement("div");
+  head.className = "head";
+  const name = document.createElement("b");
+  name.textContent = `Draft ${msg.id}${msg.title ? " · " + msg.title : ""}`;
+  const meta = document.createElement("span");
+  meta.textContent = `${msg.label} · ${msg.size.join("×")} · v${msg.version}`;
+  head.append(name, meta);
+
+  const slides = document.createElement("div");
+  slides.className = "slides";
+  for (const slide of msg.slides) {
+    slides.appendChild(mediaElement({ kind: slide.kind, url: slide.url, name: `slide`, prompt: "" }));
+  }
+
+  const caption = document.createElement("div");
+  caption.className = "caption" + (msg.caption ? "" : " empty");
+  caption.textContent = msg.caption || (msg.caption_limit ? "No caption yet" : "This placement has no caption");
+
+  const problems = (msg.check.checks || []).filter((c) => c.status !== "pass");
+  let checks;
+  if (problems.length) {
+    checks = document.createElement("ul");
+    for (const c of problems) {
+      const li = document.createElement("li");
+      li.className = c.status;
+      li.textContent = `${c.label}: ${c.detail}`;
+      checks.appendChild(li);
+    }
+  } else {
+    checks = document.createElement("div");
+    checks.className = "ok";
+    checks.textContent = `✓ Fits ${msg.check.label}` + (msg.caption_limit ? ` · ${[...msg.caption].length}/${msg.caption_limit}` : "");
+  }
+
+  el.append(head, ...(msg.slides.length ? [slides] : []), caption, checks);
+  log.scrollTop = log.scrollHeight;
+}
+
 // ---------- Attachments ----------
 
-const MAX_FILE = 10 * 1024 * 1024;  // the WebSocket takes up to 16 MB per message (base64 adds a third)
-
-function readDataURL(blob) {
-  return new Promise((resolve, reject) => {
-    const r = new FileReader();
-    r.onload = () => resolve(r.result);
-    r.onerror = () => reject(r.error);
-    r.readAsDataURL(blob);
-  });
-}
-
-async function shrinkImage(file, max = 2048) {
-  const bmp = await createImageBitmap(file);
-  const scale = Math.min(1, max / Math.max(bmp.width, bmp.height));
-  if (scale === 1 && file.size <= MAX_FILE) { bmp.close(); return readDataURL(file); }
-  const canvas = document.createElement("canvas");
-  canvas.width = Math.round(bmp.width * scale);
-  canvas.height = Math.round(bmp.height * scale);
-  canvas.getContext("2d").drawImage(bmp, 0, 0, canvas.width, canvas.height);
-  bmp.close();
-  let url = canvas.toDataURL(file.type === "image/png" ? "image/png" : "image/jpeg", 0.92);
-  if (url.length > MAX_FILE * 1.3) url = canvas.toDataURL("image/jpeg", 0.9);
-  return url;
-}
-
-async function uploadFile(file) {
-  try {
-    ensureAudioCtx();
-    await ensureConnected();
-    const name = file.name || "pasted.png";
-    if (name.toLowerCase().endsWith(".json") || file.type === "application/json") {
-      let workflow;
-      try { workflow = JSON.parse(await file.text()); } catch { throw new Error(`${name} is not valid JSON`); }
-      ws.send(JSON.stringify({ type: "upload", name, workflow }));
-      return;
+async function upload(files) {
+  for (const f of files) {
+    try {
+      await uploadFile(link, f);
+    } catch (e) {
+      add("err", `Upload failed: ${e.message}`);
     }
-    let data;
-    if (file.type.startsWith("image/") && file.type !== "image/gif") data = await shrinkImage(file);
-    else if (file.size > MAX_FILE) throw new Error(`${name} is too large (max 10 MB)`);
-    else data = await readDataURL(file);
-    ws.send(JSON.stringify({ type: "upload", name, data }));
-  } catch (e) {
-    add("err", `Upload failed: ${e.message}`);
   }
 }
 
 $("attach").onclick = () => $("file").click();
 $("file").onchange = async () => {
-  for (const f of $("file").files) await uploadFile(f);
+  await upload([...$("file").files]);
   $("file").value = "";
 };
-document.addEventListener("paste", async (e) => {
-  const files = [...(e.clipboardData?.files || [])];
-  if (!files.length) return;
-  e.preventDefault();
-  for (const f of files) await uploadFile(f);
-});
-document.addEventListener("dragover", (e) => {
-  if (![...e.dataTransfer.types].includes("Files")) return;
-  e.preventDefault();
-  document.body.classList.add("dropping");
-});
-document.addEventListener("dragleave", (e) => {
-  if (!e.relatedTarget) document.body.classList.remove("dropping");
-});
-document.addEventListener("drop", async (e) => {
-  document.body.classList.remove("dropping");
-  if (!e.dataTransfer.files.length) return;
-  e.preventDefault();
-  for (const f of e.dataTransfer.files) await uploadFile(f);
-});
-
+acceptFiles(upload);
 // ---------- Browser agent panel ----------
 
 function onBrowserTask(msg) {
@@ -323,87 +288,20 @@ function onBrowserStep(msg) {
   }
 }
 
-$("bcancel").onclick = () => {
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "cancel_task" }));
-};
-
-// ---------- Playback ----------
-
-function ensureAudioCtx() {
-  if (!audioCtx) audioCtx = new AudioContext();
-  if (audioCtx.state === "suspended") audioCtx.resume();
-}
-
-function onAudio(buf) {
-  const turn = new DataView(buf).getUint32(0, true);
-  if (turn < minTurn || !audioCtx) return;
-  const pcm = new Int16Array(buf, 4);
-  const audio = audioCtx.createBuffer(1, pcm.length, ttsRate);
-  const ch = audio.getChannelData(0);
-  for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
-
-  const src = audioCtx.createBufferSource();
-  src.buffer = audio;
-  src.connect(audioCtx.destination);
-  const start = Math.max(audioCtx.currentTime + 0.03, nextPlayTime);
-  src.start(start);
-  nextPlayTime = start + audio.duration;
-  sources.push(src);
-  src.onended = () => { sources = sources.filter((s) => s !== src); };
-}
-
-function stopPlayback() {
-  for (const s of sources) { try { s.stop(); } catch {} }
-  sources = [];
-  nextPlayTime = 0;
-}
+$("bcancel").onclick = () => link.send({ type: "cancel_task" });
 
 // ---------- Microphone ----------
 
-async function startMic() {
-  ensureAudioCtx();
-  await ensureConnected();
-  micStream = await navigator.mediaDevices.getUserMedia({
-    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-  });
-  if (!workletLoaded) { await audioCtx.audioWorklet.addModule("mic-worklet.js"); workletLoaded = true; }
-  const source = audioCtx.createMediaStreamSource(micStream);
-  micNode = new AudioWorkletNode(audioCtx, "mic-processor");
-  analyser = audioCtx.createAnalyser();
-  analyser.fftSize = 512;
-  source.connect(analyser);
-  source.connect(micNode);
-  micNode.port.onmessage = (ev) => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    // Without barge-in, don't let the assistant's own voice reach the server
-    if (!$("bargein").checked && playing()) return;
-    ws.send(ev.data);
-  };
-  micOn = true;
-  $("mic").textContent = "Stop talking";
-  $("mic").classList.add("on");
-  drawMeter();
-}
-
-function stopMic() {
-  micOn = false;
-  if (micNode) { micNode.port.onmessage = null; micNode.disconnect(); micNode = null; }
-  if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
-  analyser = null;
-  userSpeaking = false;
+function micOff() {
+  link.stopMic();
   $("mic").textContent = "Start talking";
   $("mic").classList.remove("on");
   $("meter").firstElementChild.style.width = "0";
 }
 
 function drawMeter() {
-  if (!analyser) return;
-  const data = new Float32Array(analyser.fftSize);
-  analyser.getFloatTimeDomainData(data);
-  let sum = 0;
-  for (const v of data) sum += v * v;
-  const level = Math.min(1, Math.sqrt(sum / data.length) * 6);
-  $("meter").firstElementChild.style.width = `${level * 100}%`;
+  if (!link.micOn) return;
+  $("meter").firstElementChild.style.width = `${link.level() * 100}%`;
   requestAnimationFrame(drawMeter);
 }
 
@@ -411,24 +309,29 @@ function drawMeter() {
 
 $("mic").onclick = async () => {
   try {
-    if (micOn) stopMic();
-    else await startMic();
+    if (link.micOn) {
+      micOff();
+    } else {
+      await link.startMic();
+      $("mic").textContent = "Stop talking";
+      $("mic").classList.add("on");
+      drawMeter();
+    }
   } catch (e) {
     add("err", `Microphone error: ${e.message}`);
-    stopMic();
+    micOff();
   }
 };
 
-$("stop").onclick = () => {
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "interrupt" }));
-  stopPlayback();
-};
+$("stop").onclick = () => link.interrupt();
 
 $("reset").onclick = () => {
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "reset" }));
-  stopPlayback();
+  link.send({ type: "reset" });
+  link.stopPlayback();
   log.innerHTML = "";
   for (const id in jobCards) delete jobCards[id];
+  for (const id in draftCards) delete draftCards[id];
+  for (const id in approvalCards) delete approvalCards[id];
   add("sys", "conversation reset");
 };
 
@@ -437,9 +340,7 @@ $("form").onsubmit = async (e) => {
   const text = $("text").value.trim();
   if (!text) return;
   try {
-    ensureAudioCtx();
-    await ensureConnected();
-    ws.send(JSON.stringify({ type: "text", text }));
+    await link.say(text);
     $("text").value = "";
   } catch (err) {
     add("err", err.message);

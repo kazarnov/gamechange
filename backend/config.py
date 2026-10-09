@@ -16,7 +16,8 @@ class Settings(BaseSettings):
     # GLM 5.3 Flash leaks its reasoning into the reply with think=false; "low" keeps it
     # separate and is the fastest clean option. Accepts true | false | low | medium | high
     llm_think: bool | Literal["low", "medium", "high"] = "low"
-    llm_max_tool_rounds: int = 5
+    # Tool-calling rounds per reply; a post or a carousel takes one (create_draft does it all)
+    llm_max_tool_rounds: int = 12
     system_prompt: str = (
         "You are a friendly voice assistant having a spoken conversation. "
         "Your replies are converted to speech, so keep them short and natural: "
@@ -45,6 +46,11 @@ class Settings(BaseSettings):
     tts_voice_instruct: str = "female, moderate pitch, american accent"
     tts_ref_audio: str = ""
     tts_ref_text: str = ""
+    # Speech from a VoiceStudio server instead of this PC's GPU (backend/voicestudio.py), e.g.
+    # https://<pod-id>-8002.proxy.runpod.net. Empty = OmniVoice here, with the settings above
+    tts_url: str = ""
+    tts_api_key: str = ""
+    tts_voice: str = "alloy"  # a VoiceStudio voice profile's name or id, or an OpenAI voice name
 
     # Browser agent (Playwright)
     browser_enabled: bool = True
@@ -63,6 +69,18 @@ class Settings(BaseSettings):
     comfyui_descriptions: str = "comfyui/descriptions.yaml"  # what each workflow is for
     comfyui_timeout_minutes: int = 30  # give up waiting for one generation after this
     media_dir: str = "media"  # generated and attached files, served at /media
+
+    # Content studio: post drafts for Instagram and X (backend/studio.py)
+    content_skills_dir: str = "skills/content"  # how to make each kind of post
+    fonts_dir: str = "fonts"  # .ttf/.otf files for text on pictures; a file's name is its font name
+
+    # FlowAI (content-generator/): where drafts are saved as posts and scheduled (backend/flowai.py)
+    flowai_url: str = ""  # its API, e.g. http://localhost:8002; empty = off
+    # The dashboard: links to posts point here, and FlowAI only accepts cookie sign-ins from it
+    flowai_dashboard_url: str = "http://localhost:5173"
+    # Until FlowAI issues the assistant a token (FLOWAI_INTEGRATION.md, change 1), it signs in as this user
+    flowai_email: str = ""
+    flowai_password: str = ""
 
     # VAD / turn taking
     vad_threshold: float = 0.5

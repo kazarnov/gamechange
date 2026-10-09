@@ -16,9 +16,11 @@ from .llm import LLM
 from .session import Models, VoiceSession
 from .tts import SAMPLE_RATE as TTS_RATE
 from .tts import TTSEngine
+from .voicestudio import VoiceStudioTTS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-logging.getLogger("httpx").setLevel(logging.WARNING)
+for name in ("httpx", "httpx2"):  # every model download request otherwise (httpx2: huggingface_hub)
+    logging.getLogger(name).setLevel(logging.WARNING)
 log = logging.getLogger("voice-agent")
 
 MEDIA_DIR = ROOT / settings.media_dir
@@ -43,16 +45,20 @@ async def lifespan(app: FastAPI):
     asr = ASREngine(settings.asr_model, settings.asr_device, getattr(torch, settings.asr_dtype),
                     settings.asr_language, settings.asr_lookahead)
     ref_text = settings.tts_ref_text
-    if settings.tts_ref_audio and not ref_text:
+    if settings.tts_ref_audio and not ref_text and not settings.tts_url:
         # Transcribe the voice reference with our ASR instead of OmniVoice's Whisper (saves VRAM)
         ref_text = asr.transcribe(load_audio(settings.tts_ref_audio, sampling_rate=asr.sample_rate))
         log.info("Voice reference transcript: %r", ref_text)
+    if settings.tts_url:
+        tts = VoiceStudioTTS(settings.tts_url, settings.tts_api_key, settings.tts_voice, settings.tts_speed)
+    else:
+        tts = TTSEngine(settings.tts_model, settings.tts_device, getattr(torch, settings.tts_dtype),
+                        settings.tts_num_step, settings.tts_speed,
+                        settings.tts_voice_instruct, settings.tts_ref_audio, ref_text,
+                        transcribe=lambda audio: asr.transcribe(resample(audio, TTS_RATE, asr.sample_rate)))
     app.state.models = Models(
         asr=asr,
-        tts=TTSEngine(settings.tts_model, settings.tts_device, getattr(torch, settings.tts_dtype),
-                      settings.tts_num_step, settings.tts_speed,
-                      settings.tts_voice_instruct, settings.tts_ref_audio, ref_text,
-                      transcribe=lambda audio: asr.transcribe(resample(audio, TTS_RATE, asr.sample_rate))),
+        tts=tts,
         llm=LLM(settings.ollama_host, settings.ollama_api_key, settings.llm_model, settings.llm_think),
     )
     if settings.browser_enabled:
@@ -90,6 +96,7 @@ app = FastAPI(title="Voice Agent", lifespan=lifespan)
 def health():
     comfy = app.state.models.comfy
     return {"ok": True, "llm": settings.llm_model, "asr_mode": settings.asr_mode,
+            "tts": "voicestudio" if settings.tts_url else "local", "flowai": settings.flowai_url or "off",
             "comfyui": "off" if not comfy else (comfy.error or f"ok, {len(comfy.workflows)} workflows")}
 
 
@@ -102,4 +109,5 @@ async def ws_endpoint(ws: WebSocket):
 
 
 app.mount("/media", StaticFiles(directory=MEDIA_DIR), name="media")
+app.mount("/fonts", StaticFiles(directory=ROOT / settings.fonts_dir), name="fonts")  # the page uses them too
 app.mount("/", StaticFiles(directory=ROOT / "web", html=True), name="web")

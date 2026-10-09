@@ -11,13 +11,29 @@ Wire protocol
             {"type": "upload", "name": "x.json", "workflow": {...}}
                                                attach a ComfyUI workflow file
             {"type": "reset"}                  clear conversation history
+            {"type": "hello", "timezone": "Europe/Paris"}
+                                               the user's time zone, for scheduling
+            {"type": "focus", "draft": 1, "slide": 1, "text": 2}
+                                               what the user selected on screen ("this", "it");
+                                               {"type": "focus"} clears it
+            {"type": "action", "name": "undo" | "save", "draft": 1}
+            {"type": "action", "name": "open_post", "post": 12}
+                                               a button on the page, done without the LLM
+            {"type": "approve" | "decline", "id": 3}
+                                               the user's answer to an approval (scheduling); with
+                                               "done": true the page booked the post itself
   server -> client
     binary: 4-byte little-endian turn id + PCM16 mono 24 kHz assistant speech
     json:   ready | vad | transcript | assistant_delta | assistant_done |
             tool_call | tool_result | interrupt | error |
             browser_task (started/done/failed/cancelled) | browser_step |
             media_job (generate/install: started/running/done/failed/cancelled) |
-            media (a generated or attached file, served at /media/...)
+            media (a generated or attached file, served at media/..., next to the page) |
+            draft (a post draft's new version: its slides as files, where its texts are, caption
+                   and platform check) |
+            flowai (the signed-in user and their accounts) | posts (the latest FlowAI posts) |
+            saved (a draft's FlowAI post: id, saved version, status, link) |
+            approval (something the user must approve on screen, and its outcome)
 """
 
 import asyncio
@@ -26,6 +42,7 @@ import logging
 import struct
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 
 import numpy as np
 from fastapi import WebSocket, WebSocketDisconnect
@@ -36,14 +53,18 @@ from .browser import Browser
 from .browser_agent import BrowserAgent
 from .comfyui import ComfyClient, ComfyError
 from .config import ROOT, settings
+from .flowai import FlowAIClient, FlowAISession
 from .llm import LLM
 from .media import MediaSession
 from .skills import catalogue, load_skills
+from .studio import StudioSession
 from .tts import SAMPLE_RATE as TTS_RATE
 from .tts import SentenceChunker, TTSEngine
 from .vad import TurnDetector
 
 log = logging.getLogger(__name__)
+
+SKILLS_INLINE_CHARS = 8000  # content skills up to this size go in the prompt instead of load_skill
 
 
 @dataclass
@@ -74,6 +95,12 @@ class VoiceSession:
         self.vad = TurnDetector(settings.vad_threshold, settings.vad_min_silence_ms,
                                 settings.vad_min_speech_ms, settings.vad_preroll_ms)
         self.media = self.new_media()
+        self.studio = self.new_studio()
+        self.flowai = self.new_flowai()
+        self.flowai_loading: asyncio.Task | None = None
+        self.focus: dict = {}  # what the user selected on screen
+        self.focus_told: dict = {}  # the selection the LLM was last told about
+        self.skills_inline = False  # set by system_prompt()
         self.messages: list = [{"role": "system", "content": self.system_prompt()}]
         self.send_lock = asyncio.Lock()
         self.turn = 0
@@ -88,11 +115,23 @@ class VoiceSession:
         self.notes: list[str] = []  # events (task results, uploads) the LLM hasn't seen yet
         self.announce = False  # a note needs a spoken reply even if the user says nothing
 
-    def new_media(self) -> MediaSession | None:
-        if not self.m.comfy:
-            return None
+    def new_media(self) -> MediaSession:
+        """Numbered pictures and files; generating them needs the ComfyUI pod (self.m.comfy)."""
         return MediaSession(self.m.comfy, ROOT / settings.media_dir, settings.comfyui_timeout_minutes * 60,
-                            self.try_send, self.add_note, lambda text: self.add_note(text, announce=False))
+                            self.try_send, self.add_note, self.remember)
+
+    def new_studio(self) -> StudioSession:
+        return StudioSession(self.media, ROOT / settings.media_dir, ROOT / settings.fonts_dir, self.try_send)
+
+    def new_flowai(self) -> FlowAISession | None:
+        if not settings.flowai_url:
+            return None
+        client = FlowAIClient(settings.flowai_url, settings.flowai_dashboard_url,
+                              settings.flowai_email, settings.flowai_password)
+        return FlowAISession(client, self.studio, self.media, self.try_send, self.add_note, self.remember)
+
+    def remember(self, text: str):
+        self.add_note(text, announce=False)
 
     def system_prompt(self) -> str:
         prompt = settings.system_prompt
@@ -120,6 +159,41 @@ class VoiceSession:
                 "a URL they give), confirm the choice with the user, then call add_media_workflow. "
                 "Workflows on the pod:\n" + self.m.comfy.catalogue()
             )
+        skills = load_skills(ROOT / settings.content_skills_dir)
+        # Small playbooks go in the prompt: that saves a load_skill round (about two seconds) per new
+        # kind of post, and prompt length barely changes response time. A big library is loaded on demand.
+        self.skills_inline = sum(len(k.instructions) for k in skills.values()) <= SKILLS_INLINE_CHARS
+        prompt += (
+            "\n\nYou are also the content studio of a social media agency: you make posts for Instagram and X "
+            "as drafts the user sees on screen, and change them when asked. A draft has a number, a caption, and "
+            "slides (one picture or video each) with texts drawn on top. Make a new post with one create_draft "
+            "call that has everything: title, caption, texts"
+            + (", and pictures (one prompt per slide: each is made in the draft's shape and goes in by itself "
+               "when ready, so don't wait or check on it; you'll be told). To change what is in a slide's "
+               "picture, call generate_media with draft and slide and an editing workflow; its prompt says only "
+               "what to change, e.g. 'Remove the plant in the background, keep everything else the same'"
+               if self.m.comfy else
+               ". Pictures come from files the user attaches"
+               + (" or from the FlowAI gallery (use_assets)" if self.flowai else "")
+               + ", since making new ones is off")
+            + ". Words on a picture always go through texts or add_text, never through the image model. Change "
+            "the caption with update_draft and texts with edit_text or remove_text; to go back, use undo_draft. "
+            "Make independent changes together in one step. Change only what the user named (the headline is one "
+            "text) and keep everything else. Never leave a placeholder such as [date] or [link] in a caption or "
+            "text: write the real words (\"this Friday\") or ask. The user sees every new version, so say in a few "
+            "words what changed instead of reading captions aloud, and mention any problem the platform check "
+            "reports. "
+            + ("How to make each kind of post:\n\n" + "\n\n".join(f"### {k.name}: {k.description}\n{k.instructions}"
+                                                               for k in skills.values())
+               if self.skills_inline else
+               "Before making a kind of post, call load_skill for it and follow it. Content skills:\n"
+               + catalogue(skills))
+        )
+        if self.flowai:
+            prompt += self.flowai.prompt()
+        # The date, not the time, so the prompt stays the same all day (the time is a tool call away)
+        today = datetime.now(self.flowai.tz if self.flowai else None)
+        prompt += f"\n\nToday is {today:%A} {today.day} {today:%B %Y}."
         return prompt
 
     # --- sending ------------------------------------------------------------------
@@ -147,6 +221,8 @@ class VoiceSession:
 
     async def run(self):
         await self.send(type="ready", tts_sample_rate=TTS_RATE, asr_mode=settings.asr_mode)
+        if self.flowai:
+            self.flowai_loading = asyncio.create_task(self.flowai.load())
         try:
             while True:
                 msg = await self.ws.receive()
@@ -161,8 +237,9 @@ class VoiceSession:
         finally:
             await self.interrupt(notify=False)
             await self.cancel_browser_task()
-            if self.media:
-                await self.media.close()
+            await self.media.close()
+            if self.flowai:
+                await self.flowai.client.close()
             if self.stream:
                 await asyncio.to_thread(self.stream.finish)
 
@@ -178,25 +255,77 @@ class VoiceSession:
                 await self.cancel_browser_task()
             case "upload":
                 await self.on_upload(msg)
+            case "hello":
+                if self.flowai:
+                    self.flowai.set_timezone(msg.get("timezone", ""))
+            case "focus":
+                self.focus = {k: msg[k] for k in ("draft", "slide", "text") if msg.get(k) not in (None, "")}
+            case "action" | "approve" | "decline":
+                # Uploads to FlowAI take a moment: keep reading mic audio meanwhile
+                task = asyncio.create_task(self.on_action(msg))
+                self.background.add(task)
+                task.add_done_callback(self.background.discard)
             case "reset":
                 await self.interrupt()
                 await self.cancel_browser_task()
-                if self.media:
-                    await self.media.close()
-                    self.media = self.new_media()
+                await self.media.close()
+                self.media = self.new_media()
+                self.studio = self.new_studio()
+                if self.flowai:
+                    self.flowai.reset(self.studio, self.media)
+                self.focus, self.focus_told = {}, {}
                 self.notes.clear()
                 self.announce = False
                 self.messages = [{"role": "system", "content": self.system_prompt()}]
 
     async def on_upload(self, msg: dict):
-        if not self.media:
-            await self.send(type="error", message="Attachments are used for image generation, "
-                                                  "which is off (set COMFYUI_URL).")
-            return
         try:
             await self.media.upload(msg.get("name", ""), msg.get("data"), msg.get("workflow"))
         except ComfyError as exc:
             await self.send(type="error", message=f"Upload failed: {exc}")
+
+    async def on_action(self, msg: dict):
+        """A button on the page: done directly, then the LLM is told so the conversation stays in step."""
+        kind, name = msg["type"], msg.get("name")
+        if kind in ("approve", "decline"):
+            if self.flowai:
+                await self.flowai.decide(msg.get("id"), approve=kind == "approve", done=bool(msg.get("done")))
+            return
+        if name == "undo":
+            result = await self.studio.undo(msg.get("draft"))
+            done = f"pressed Undo on draft {result.get('draft')}: it is now as it was before its last change " \
+                   f"(version {result.get('version')})"
+        elif name == "save" and self.flowai:
+            result = await self.flowai.save(msg.get("draft"))
+            done = f"pressed Save: {result.get('saved')}"
+        elif name == "open_post" and self.flowai:
+            result = await self.flowai.open_post(msg.get("post"))
+            done = f"opened a FlowAI post: {result.get('opened')}"
+        else:
+            return
+        if "error" in result:
+            await self.send(type="error", message=result["error"][:1].upper() + result["error"][1:])
+            return
+        self.remember(f"On screen, the user {done}.")
+
+    def focus_note(self) -> str | None:
+        """What the user selected on screen, for "this" and "it", when it changed since the LLM was told."""
+        if self.focus == self.focus_told:
+            return None
+        self.focus_told = dict(self.focus)
+        d = self.studio.drafts.get(self.focus.get("draft"))
+        if not d:
+            return None
+        what = f"draft {d.id}"
+        if self.focus.get("slide"):
+            what = f"slide {self.focus['slide']} of {what}"
+        if self.focus.get("text"):
+            try:
+                _, t = d.find_text(self.focus["text"])
+                what = f"text {t.id} (“{t.text}”) on {what}"
+            except Exception:
+                pass
+        return f"On screen, the user has selected {what}; “this” or “it” means that."
 
     # --- user speech --------------------------------------------------------------
 
@@ -281,7 +410,11 @@ class VoiceSession:
         """Answers user_text, or with None just reacts to pending notes (task results)."""
         if self.m.comfy:
             self.m.comfy.maybe_refresh()  # the workflow list in the prompt; picked up next turn
+        if self.flowai_loading and not self.flowai_loading.done():
+            await asyncio.wait({self.flowai_loading}, timeout=5)  # the accounts go in the prompt
         self.messages[0]["content"] = self.system_prompt()
+        if user_text and (focus := self.focus_note()):
+            self.notes.append(focus)
         for note in self.notes:
             self.messages.append({"role": "system", "content": note})
         self.notes.clear()
@@ -292,13 +425,17 @@ class VoiceSession:
         speaker = asyncio.create_task(self.speak(sentences, turn))
         t0 = time.perf_counter()
         first_token = True
+        rounds, used, usage = 0, 0, {}
+        exclude = (set() if self.m.browser else tools.BROWSER_TOOLS) | \
+                  (set() if self.m.comfy else tools.MEDIA_TOOLS) | \
+                  (set() if self.flowai else tools.FLOWAI_TOOLS) | \
+                  ({"load_skill"} if self.skills_inline else set())
         try:
             for _ in range(settings.llm_max_tool_rounds):
                 content, calls, chunker = "", [], SentenceChunker()
+                rounds += 1
                 try:
-                    exclude = (set() if self.m.browser else tools.BROWSER_TOOLS) | \
-                              (set() if self.media else tools.MEDIA_TOOLS)
-                    async for msg in self.m.llm.stream(self.messages, tools.schemas(exclude)):
+                    async for msg in self.m.llm.stream(self.messages, tools.schemas(exclude), usage):
                         if msg.content:
                             if first_token:
                                 log.info("LLM first token %.0f ms", (time.perf_counter() - t0) * 1000)
@@ -317,7 +454,10 @@ class VoiceSession:
                     sentences.put_nowait(s)
                 if not calls:
                     break
+                used += len(calls)
                 await self.run_tools(calls, turn)
+            log.info("reply in %.1f s: %d model calls, %d tool calls, %d prompt and %d output tokens",
+                     time.perf_counter() - t0, rounds, used, usage.get("prompt", 0), usage.get("output", 0))
 
             sentences.put_nowait(None)
             await speaker

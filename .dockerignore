@@ -1,0 +1,9 @@
+# Only backend/, web/, skills/, fonts/ and comfyui/descriptions.yaml go into the image
+*
+!backend/
+!web/
+!skills/
+!fonts/
+!comfyui/descriptions.yaml
+!requirements.txt
+**/__pycache__

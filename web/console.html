@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voice Agent console</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --panel: #fff; --text: #1d1d1b; --muted: #6b6b66; --line: #e3e3de;
+    --accent: #2f6fde; --user: #e8effc; --bot: #f1f1ee; --tool: #fdf6e3; --danger: #c8412f;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #151515; --panel: #1e1e1d; --text: #ececea; --muted: #9a9a94; --line: #2e2e2c;
+      --accent: #6a9cf5; --user: #1f2b42; --bot: #262624; --tool: #2f2a1b; --danger: #ef6b58;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.5 system-ui, sans-serif; background: var(--bg); color: var(--text); }
+  main { max-width: 760px; margin: 0 auto; padding: 24px 16px; display: flex; flex-direction: column; gap: 16px; min-height: 100vh; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  h1 { font-size: 18px; margin: 0; }
+  .status { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--line); transition: background .15s; }
+  .dot.listening { background: #3aa65b; }
+  .dot.hearing { background: #e5a50a; box-shadow: 0 0 0 4px #e5a50a33; }
+  .dot.thinking { background: var(--accent); }
+  .dot.speaking { background: #9b51e0; box-shadow: 0 0 0 4px #9b51e033; }
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  button { font: inherit; border: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 8px 14px; border-radius: 8px; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary.on { background: var(--danger); border-color: var(--danger); }
+  button:disabled { opacity: .5; cursor: default; }
+  label { font-size: 13px; color: var(--muted); display: inline-flex; gap: 6px; align-items: center; }
+  #log { flex: 1; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; min-height: 300px; max-height: 62vh; }
+  .msg { padding: 8px 12px; border-radius: 10px; max-width: 85%; white-space: pre-wrap; word-wrap: break-word; }
+  .user { background: var(--user); align-self: flex-end; }
+  .user.partial { opacity: .6; font-style: italic; }
+  .bot { background: var(--bot); align-self: flex-start; }
+  .bot.cut::after { content: " ✂"; color: var(--muted); }
+  .tool { background: var(--tool); align-self: flex-start; font: 12px/1.4 ui-monospace, monospace; }
+  .sys { align-self: center; font-size: 12px; color: var(--muted); }
+  .err { align-self: center; font-size: 13px; color: var(--danger); }
+  form { display: flex; gap: 8px; }
+  input[type=text] { flex: 1; min-width: 0; font: inherit; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--text); }
+  #browser { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+  #browser .head { display: flex; align-items: center; gap: 8px; justify-content: space-between; flex-wrap: wrap; font-size: 13px; }
+  #browser .task { font-weight: 600; overflow-wrap: anywhere; }
+  #browser .badge { font-size: 12px; padding: 2px 8px; border-radius: 99px; background: var(--line); color: var(--muted); }
+  #browser .badge.running { background: var(--accent); color: #fff; }
+  #browser .badge.done { background: #3aa65b; color: #fff; }
+  #browser .badge.failed, #browser .badge.cancelled { background: var(--danger); color: #fff; }
+  #browser img { width: 100%; max-height: 320px; object-fit: contain; object-position: top; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+  #steps { margin: 0; padding-left: 20px; font: 12px/1.5 ui-monospace, monospace; color: var(--muted); max-height: 120px; overflow-y: auto; }
+  #steps li { overflow-wrap: anywhere; }
+  .media { display: flex; flex-direction: column; gap: 6px; white-space: normal; }
+  .media img, .media video { display: block; max-width: 100%; max-height: 420px; border-radius: 8px; background: var(--line); }
+  .media audio { max-width: 100%; }
+  .media .cap { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+  .media .cap b { color: var(--text); font-weight: 600; }
+  .media.pending .cap b::after { content: " ●"; color: var(--accent); animation: pulse 1s infinite alternate; }
+  .media.failed .cap b { color: var(--danger); }
+  @keyframes pulse { from { opacity: .2; } to { opacity: 1; } }
+  .draft { max-width: 100%; width: 100%; display: flex; flex-direction: column; gap: 8px; white-space: normal; }
+  .draft.old { opacity: .5; }
+  .draft .head { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
+  .draft .head b { color: var(--text); }
+  .draft .slides { display: flex; gap: 8px; overflow-x: auto; scroll-snap-type: x mandatory; }
+  .draft .slides > * { flex: none; max-width: 100%; scroll-snap-align: start; }
+  .draft .slides img, .draft .slides video { display: block; height: 360px; width: auto; max-width: 100%; border-radius: 8px; background: var(--line); object-fit: contain; }
+  .draft.old .slides img, .draft.old .slides video { height: 120px; }
+  .draft .caption { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; }
+  .draft .caption.empty { color: var(--muted); font-style: italic; }
+  .draft ul { margin: 0; padding-left: 18px; font-size: 12px; }
+  .draft li.fail { color: var(--danger); }
+  .draft li.warn { color: #b7791f; }
+  .draft .ok { font-size: 12px; color: #3aa65b; }
+  #attach { padding: 8px 11px; }
+  body.dropping #log { outline: 2px dashed var(--accent); outline-offset: -6px; }
+  #meter { width: 80px; height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
+  #meter > div { height: 100%; width: 0; background: #3aa65b; transition: width .05s; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Voice Agent <small style="font-weight:400;color:var(--muted)">console · <a href="./" style="color:inherit">agent page</a></small></h1>
+    <span class="status"><span id="dot" class="dot"></span><span id="state">disconnected</span><span id="meter"><div></div></span></span>
+  </header>
+
+  <div class="controls">
+    <button id="mic" class="primary">Start talking</button>
+    <button id="stop" title="Stop the assistant">Interrupt</button>
+    <button id="reset" title="Clear conversation history">Reset</button>
+    <label title="When off, your mic is muted while the assistant speaks (use if you have no headphones)">
+      <input type="checkbox" id="bargein" checked> Allow interrupting by voice
+    </label>
+  </div>
+
+  <section id="browser" hidden>
+    <div class="head">
+      <span>Browser · <span class="task" id="btask"></span></span>
+      <span><span class="badge" id="bstatus"></span> <button id="bcancel" type="button">Cancel task</button></span>
+    </div>
+    <img id="bshot" alt="Screenshot of the browser" hidden>
+    <ol id="steps"></ol>
+  </section>
+
+  <div id="log" aria-live="polite"></div>
+
+  <form id="form">
+    <button id="attach" type="button" title="Attach a picture, video or ComfyUI workflow (.json). You can also paste or drop files.">📎</button>
+    <input id="file" type="file" accept="image/*,video/*,audio/*,.json,application/json" multiple hidden>
+    <input id="text" type="text" placeholder="…or type a message" autocomplete="off">
+    <button type="submit">Send</button>
+  </form>
+</main>
+<script type="module" src="app.js"></script>
+</body>
+</html>

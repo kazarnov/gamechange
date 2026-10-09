@@ -1,5 +1,5 @@
 # Install PyTorch first, matching your CUDA driver:
-#   uv pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu126
+#   uv pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
 fastapi>=0.115
 uvicorn[standard]>=0.30
 pydantic-settings>=2.4
@@ -12,3 +12,4 @@ soundfile
 playwright>=1.50
 pyyaml
 httpx
+pillow>=10.1

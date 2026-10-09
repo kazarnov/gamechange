@@ -5,6 +5,9 @@ talking, and when the files are downloaded they appear in the web UI and the ass
 told (a note) so it can say so. Every picture, video or attached file gets a number the user
 and the assistant can refer to ("animate number three"). Files are kept in MEDIA_DIR, served
 at /media, because the pod's disk is not permanent.
+
+Without a pod (COMFYUI_URL empty) the numbered files still work: attachments and pictures from
+the FlowAI gallery can go into post drafts; only generating is off.
 """
 
 import asyncio
@@ -26,7 +29,7 @@ from .comfyui import MEDIA_INPUTS, ComfyClient, ComfyError, describe_error, file
 
 log = logging.getLogger(__name__)
 
-MAX_RUNNING = 3  # generations per conversation at once (the pod runs them one by one anyway)
+MAX_RUNNING = 10  # generations per conversation at once, e.g. a whole carousel (the pod runs them one by one)
 MAX_UPLOAD = 15 * 1024 * 1024
 MAX_WORKFLOW_DOWNLOAD = 10 * 1024 * 1024
 POLL_ERRORS = 5  # consecutive failed polls before giving up on a job
@@ -48,7 +51,7 @@ class MediaItem:
 
     def event(self, job: int | None = None) -> dict:
         return {"type": "media", "id": self.id, "kind": self.kind, "name": self.name, "source": self.source,
-                "url": f"/media/{self.path.name}" if self.path else None,
+                "url": f"media/{self.path.name}" if self.path else None,
                 "workflow": self.workflow, "prompt": self.prompt, "job": job}
 
 
@@ -65,6 +68,8 @@ class MediaJob:
     setup_id: str | None = None  # the manager's setup job, for installs
     progress: str = ""
     result: str = ""
+    # Called with the files once made (e.g. to put them in a post draft); returns a sentence for the note
+    then: Callable[[list["MediaItem"]], Awaitable[str]] | None = None
 
     def info(self) -> dict:
         d = {"job": self.id, "kind": self.kind, "workflow": self.workflow, "status": self.status,
@@ -78,6 +83,13 @@ class MediaJob:
 
 def _a(word: str) -> str:
     return ("an " if word[0] in "aeiou" else "a ") + word
+
+
+def _size(ratio: float, width, height) -> tuple[int, int]:
+    """A width and height of this shape with about as many pixels as the workflow's defaults."""
+    numbers = all(isinstance(v, (int, float)) and v > 0 for v in (width, height))
+    w = ((width * height if numbers else 1024 * 1024) * ratio) ** 0.5
+    return max(64, round(w / 64) * 64), max(64, round(w / ratio / 64) * 64)
 
 
 def _seconds(s: float) -> str:
@@ -95,10 +107,10 @@ def _workflow_json(data) -> dict:
 
 
 class MediaSession:
-    def __init__(self, comfy: ComfyClient, media_dir: Path, timeout_s: float,
+    def __init__(self, comfy: ComfyClient | None, media_dir: Path, timeout_s: float,
                  send: Callable[..., Awaitable[None]], notify: Callable[[str], None],
                  remember: Callable[[str], None]):
-        self.comfy = comfy
+        self.comfy = comfy  # None: no pod, so no generating
         self.dir = media_dir
         self.timeout_s = timeout_s
         self.send = send  # to the web UI; must not raise
@@ -119,6 +131,12 @@ class MediaSession:
         await asyncio.to_thread(path.write_bytes, data)
         item = MediaItem(self.item_count, kind, name, source, path, **extra)
         self.items[item.id] = item
+        return item
+
+    async def add(self, data: bytes, name: str, kind: str, source: str) -> MediaItem:
+        """A file from elsewhere (e.g. the FlowAI gallery), numbered and shown like the others."""
+        item = await self._store(data, name, kind, source)
+        await self.send(**item.event())
         return item
 
     def _latest(self, kind: str) -> MediaItem | None:
@@ -174,7 +192,19 @@ class MediaSession:
 
     # --- generation -----------------------------------------------------------------
 
+    def _pod(self) -> ComfyClient:
+        if not self.comfy:
+            raise ComfyError("picture and video generation is off (COMFYUI_URL is not set)")
+        return self.comfy
+
+    def default_workflow(self) -> str | None:
+        """The text-to-image workflow, for pictures asked for without one."""
+        found = [w.name for w in self.comfy.workflows.values()
+                 if w.ready and w.output == "image" and not w.media_inputs] if self.comfy else []
+        return found[0] if found else None
+
     async def _workflow(self, name: str):
+        self._pod()
         wf = self.comfy.workflows.get(name)
         if wf is None:  # maybe added since the last refresh
             await self.comfy.refresh()
@@ -186,7 +216,11 @@ class MediaSession:
             raise ComfyError(f"{name} is still being installed on the pod")
         return wf
 
-    async def generate(self, workflow: str, prompt: str, image=None, options=None) -> dict:
+    async def generate(self, workflow: str, prompt: str, image=None, options=None, *, ratio: float | None = None,
+                       source: str | None = None, then=None) -> dict:
+        """ratio: the shape to make (width ÷ height) when the workflow has a size the options don't set.
+        source: the picture an editing workflow edits when no image is given (instead of the latest).
+        then: see MediaJob.then."""
         try:
             wf = await self._workflow(str(workflow))
             if isinstance(options, str):
@@ -197,6 +231,10 @@ class MediaSession:
             inputs = {k: v for k, v in (options or {}).items() if k not in CONTROL_KEYS}
             if image not in (None, ""):
                 inputs["image"] = image
+            elif source is not None and "image" in wf.media_inputs:
+                inputs["image"] = source
+            if ratio and {"width", "height"} <= wf.inputs.keys() and not {"width", "height"} & inputs.keys():
+                inputs["width"], inputs["height"] = _size(ratio, wf.inputs["width"], wf.inputs["height"])
             if prompt:
                 inputs["prompt"] = prompt
 
@@ -221,7 +259,7 @@ class MediaSession:
             return {"error": str(exc)}
 
         self.job_count += 1
-        job = MediaJob(self.job_count, "generate", wf.name, prompt)
+        job = MediaJob(self.job_count, "generate", wf.name, prompt, then=then)
         self.jobs[job.id] = job
         job.task = asyncio.create_task(self._run_generation(job, inputs, wf.output))
         reply = {"job": job.id, "status": "started", "makes": wf.output,
@@ -251,10 +289,18 @@ class MediaSession:
                 await self.send(**item.event(job.id))
             job.status = "done"
             job.result = ", ".join(f"{i.kind} number {i.id}" for i in made)
+            then = ""
+            if job.then:
+                try:
+                    then = await job.then(made)
+                except Exception:
+                    log.exception("generation %d: follow-up failed", job.id)
             took = _seconds(time.monotonic() - job.started)
             await self.send(type="media_job", id=job.id, kind="generate", status="done", text=f"took {took}")
             note = (f"Generation {job.id} ({job.workflow}) finished in {took}: {job.result} is now shown on the "
                     "user's screen.")
+            if then:
+                note += f" {then}"
             if queued.get("ignored_keys"):
                 note += f" The workflow ignored these options: {', '.join(queued['ignored_keys'])}."
             note += " Tell the user it is ready in one short sentence."
@@ -295,14 +341,14 @@ class MediaSession:
 
     async def list_workflows(self) -> dict:
         try:
-            await self.comfy.refresh()
+            await self._pod().refresh()
         except ComfyError as exc:
             return {"error": str(exc)}
         return {"workflows": [w.info() for w in self.comfy.workflows.values()]}
 
     async def search_templates(self, query: str) -> dict:
         try:
-            found = await self.comfy.search_templates(query)
+            found = await self._pod().search_templates(query)
         except ComfyError as exc:
             return {"error": str(exc)}
         return {"templates": found} if found else {"templates": [], "hint": "nothing matched; try other words"}
@@ -313,6 +359,7 @@ class MediaSession:
             name = str(name).strip()
             if not NAME_RE.fullmatch(name):
                 raise ComfyError("the name may only use letters, digits, _ - and . (e.g. wan14_i2v)")
+            self._pod()
             sources = [s for s in (template, file, url) if s not in (None, "")]
             if len(sources) != 1:
                 raise ComfyError("give exactly one of template, file or url")

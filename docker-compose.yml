@@ -1,0 +1,58 @@
+# The voice agent in Docker; the agent page is on http://localhost:8000.
+#   docker compose up -d --build                 NVIDIA GPU (needs the NVIDIA container toolkit)
+#   docker compose --profile cpu up -d agent-cpu no GPU: speech from VoiceStudio (TTS_URL)
+# Settings come from .env (see .env.example). The first start downloads the speech models into
+# the "models" volume, which takes a few minutes; later starts take seconds.
+# Inside the container "localhost" is the container itself: reach FlowAI's local stack with
+# FLOWAI_URL=http://host.docker.internal:8002.
+name: voice-agent
+
+x-agent: &agent
+  env_file: .env
+  environment: &env
+    # Website tools need Chromium in the image: build with BROWSER=true and set this to true
+    BROWSER_ENABLED: "false"
+  ports:
+    - "${AGENT_PORT:-8000}:8000"
+  volumes:
+    - models:/cache          # Hugging Face downloads (speech recognition, OmniVoice)
+    - media:/app/media       # generated, attached and drawn files
+    - voices:/app/voices     # OmniVoice's cached voice
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  restart: unless-stopped
+
+services:
+  agent:
+    <<: *agent
+    build: .
+    image: flowai-agent
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # Recognition runs on the CPU. Speech should come from VoiceStudio (TTS_URL): OmniVoice on a
+  # CPU takes several seconds per sentence.
+  agent-cpu:
+    <<: *agent
+    profiles: [cpu]
+    build:
+      context: .
+      args:
+        TORCH: cpu
+    image: flowai-agent:cpu
+    environment:
+      <<: *env
+      ASR_DEVICE: cpu
+      ASR_DTYPE: float32
+      TTS_DEVICE: cpu
+      TTS_DTYPE: float32
+
+volumes:
+  models:
+  media:
+  voices:

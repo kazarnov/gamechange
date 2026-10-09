@@ -2,7 +2,9 @@
 
 A real-time conversational agent: you talk, it listens, thinks, can operate your
 website in a real browser (Playwright), makes pictures and videos with ComfyUI on a
-RunPod GPU pod, and answers out loud.
+RunPod GPU pod, makes and edits Instagram and X posts as drafts, saves and schedules them in
+FlowAI (`content-generator/`), and answers out loud. It has its own page, where all of that is
+done by talking.
 
 ```
 browser mic ──PCM16 16k──▶ WebSocket ──▶ Silero VAD ──▶ Nemotron 3.5 ASR (streaming, local GPU)
@@ -20,7 +22,7 @@ browser speaker ◀──PCM16 24k── OmniVoice TTS (local GPU) ◀── GLM
 |---|---|---|
 | ASR | `nvidia/nemotron-3.5-asr-streaming-0.6b` (cache-aware streaming RNNT) | this PC |
 | LLM | `glm-5.3-flash` via Ollama cloud API | ollama.com |
-| TTS | `k2-fsa/OmniVoice` | this PC |
+| TTS | `k2-fsa/OmniVoice` | this PC, or a VoiceStudio server (`TTS_URL`) |
 | VAD | Silero VAD | this PC (CPU) |
 | Pictures / video | ComfyUI workflows (Z-Image Turbo, FLUX.2 Klein, Wan 2.2, ...) | RunPod GPU pod (`comfyui/`) |
 
@@ -28,7 +30,7 @@ browser speaker ◀──PCM16 24k── OmniVoice TTS (local GPU) ◀── GLM
 
 ```bash
 uv venv --python 3.12 .venv
-uv pip install --python .venv torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu126
+uv pip install --python .venv torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
 uv pip install --python .venv -r requirements.txt
 .venv/bin/playwright install chromium
 sudo .venv/bin/playwright install-deps chromium   # system libraries Chromium needs (once)
@@ -41,12 +43,49 @@ cp .env.example .env   # then put your key from https://ollama.com/settings/keys
 .venv/bin/uvicorn backend.main:app --host 0.0.0.0 --port 8000
 ```
 
-Open http://localhost:8000 and click **Start talking**. The first start downloads the
-models (~6 GB) and designs the assistant's voice once (cached in `voices/`). Voice design is checked
-with the ASR and retried with new seeds if the result isn't intelligible.
+Open http://localhost:8000 (the agent page, see [below](#the-agent-page-and-flowai)) and tap the
+mic. http://localhost:8000/console.html is the test console: it shows every event, tool calls and
+browser steps included. The first start downloads the models (~6 GB) and designs the assistant's
+voice once (cached in `voices/`). Voice design is checked with the ASR and retried with new seeds if
+the result isn't intelligible.
 
-Use headphones, or untick **Allow interrupting by voice**; otherwise the assistant
-can hear itself through your speakers and interrupt itself.
+Use headphones, or untick **Interrupt by voice**; otherwise the assistant can hear itself
+through your speakers and interrupt itself.
+
+## Docker
+
+The same app as an image, to run as a service (and later inside FlowAI's stack:
+`FLOWAI_INTEGRATION.md`, change 4). Settings come from `.env`, as above.
+
+```bash
+docker compose up -d --build        # NVIDIA GPU: recognition and OmniVoice on the card
+docker compose logs -f agent        # wait for "Ready"
+```
+
+The agent page is on http://localhost:8000 (`AGENT_PORT` to change). The first start downloads
+the models (5.8 GB) into the `models` volume, which takes a few minutes. After that, a start
+takes seconds. Drawn and attached files are kept in the `media` volume, and OmniVoice's
+designed voice in `voices`.
+
+- **FlowAI from the container.** Inside it, `localhost` is the container itself. For the local
+  FlowAI stack, set `FLOWAI_URL=http://host.docker.internal:8002`.
+- **No GPU.** `docker compose --profile cpu up -d --build agent-cpu` builds a CPU-only image
+  and runs recognition on the CPU. Set `TTS_URL` so speech comes from VoiceStudio, because
+  OmniVoice on a CPU takes seconds per sentence.
+- **Website tools** are off in the container: the image has no Chromium. Build with
+  `--build-arg BROWSER=true` and set `BROWSER_ENABLED` to `true` in `docker-compose.yml` to
+  use them.
+- **Under a path.** The page, its media links and its WebSocket are all relative, so it works
+  behind a proxy at `/assistant/` (nginx settings in `FLOWAI_INTEGRATION.md`, change 4).
+
+| Image | Size | Recognition, after you stop talking | Memory |
+|---|---|---|---|
+| `flowai-agent` (GPU, RTX 5060 Ti) | 12.6 GB | 0.55 s | not measured |
+| `flowai-agent:cpu` | 2.8 GB | 2.0 to 2.3 s, using about one core | under 0.5 GB of RAM |
+
+Measured by speaking a 6-second request into the WebSocket the way the page does. The time
+includes the 0.6 s of silence that ends a turn. The GPU image's PyTorch (CUDA 12.8) runs on
+GTX 16xx up to RTX 50xx cards.
 
 ## How a turn works
 
@@ -161,6 +200,73 @@ The list is refreshed from the pod every minute, so workflows saved in the Comfy
 integration. Run `deploy.ps1` once so the pod gets it. Until then, "stop" only stops waiting, and the pod
 finishes the job.
 
+## Content studio (posts for Instagram and X)
+
+The assistant makes posts as **drafts** and changes them when you ask. A draft is shaped like a
+FlowAI post (`content-generator/`): one platform and placement, a caption, and slides. A slide is
+a picture or video with texts drawn on top. Every change makes a new version. The version is
+drawn, checked against the platform's specs (the same table and check as FlowAI's pre-export
+check, plus one of ours: no `[placeholder]` left in), and shown on the page with its problems.
+
+| You say | What happens |
+|---|---|
+| "Make an Instagram post for our linen shirt launch" | one `create_draft` with the caption, the texts and a picture prompt; the picture is made in the draft's 4:5 shape and drops in when ready |
+| "Remove the cup on the table" | `generate_media(flux2_klein_edit, draft=1)`: edits that slide's current picture and puts the result back in the draft |
+| "Make the headline yellow and move it to the bottom" / "Drop the second line" | `edit_text` / `remove_text` |
+| (click a text on the page) "make this bigger" | the click tells the assistant which text "this" is |
+| "Shorter caption, fewer hashtags" | `update_draft(caption=...)` |
+| "Go back" | `undo_draft`, as many steps as you like (or the Undo button) |
+| "Now the same for X" | `create_draft(platform=x, from_draft=1)`, re-cropped to 16:9, caption rewritten for 280 characters |
+| "A five-slide carousel on how to care for linen" | one `create_draft` with a text set and a picture prompt per slide, the same style on every slide |
+
+Text is drawn with Pillow, never by the image model, so it is spelled right and easy to change.
+Texts wrap and shrink to fit. Texts at the same position stack instead of overlapping. On stories
+and reels they keep clear of Instagram's buttons. Fonts are the `.ttf`/`.otf` files in `fonts/`
+(`bold`, `semibold`, `serif` and `mono` are FlowAI's Geist and Instrument Serif; add more by
+dropping files in). Rendered files go to `media/` like everything else. Text on videos isn't
+drawn yet.
+
+### Content skills
+
+`skills/content/*.md` say how to make each kind of post: an Instagram post, carousel and story,
+and an X post. While they total under 8000 characters (about 2,000 tokens), they go in the prompt
+whole, which saves the assistant a round of reading one before every new post. Past that, it sees
+each skill's name and description and loads the steps with `load_skill`, like the browser agent's
+skills. Copy `skills/content/_template.md` to add one (a brand's rules, a recurring format, a
+client's house style). Edits apply on the next turn, without a restart.
+
+## The agent page and FlowAI
+
+`web/index.html` is the agent's own page, in FlowAI's dashboard style. It is the working
+reference for the page FlowAI will host ([FLOWAI_INTEGRATION.md](FLOWAI_INTEGRATION.md),
+change 3).
+- **Left:** the conversation, with the mic.
+- **Middle:** the current draft as it will look on Instagram or X: carousel arrows, story bars,
+  X's picture grid, a caption past the limit highlighted, and the platform check.
+- **Right:** the session's drafts, the latest FlowAI posts and the numbered pictures.
+
+On a phone the panes stack and the mic stays at the bottom.
+
+With `FLOWAI_URL` set, the assistant works in FlowAI. At the start of a session it reads the
+user's Instagram and X accounts and each account's voice (profile and memory), and writes in it.
+
+| You say or do | What happens |
+|---|---|
+| "Save it" / **Save to FlowAI** | `save_draft`: the slides are uploaded as assets and the post is saved with status draft; saving again updates the same post |
+| "What do we have scheduled?" / "Find the linen post" | `find_posts` |
+| "Open it" / click a post in the list | `open_post`: the post becomes a draft here; saving updates it |
+| "Use the autumn photo from the gallery" | `find_assets`, `use_assets`: gallery pictures get numbers to use in drafts |
+| "Schedule it for Friday at 9" | `schedule_post`: an approval card appears; only **Approve** books it |
+| click a text on the picture | that text is selected: "make this gold" means it |
+| **Undo** / **Save** / a post in the list | done directly, in a fraction of a second, without the assistant; it is told what happened |
+
+Nothing is scheduled without a person's click. Changing a scheduled post makes it a draft
+again, and the approval card comes back for the same time. Until FlowAI issues the assistant a
+token, it signs in with `FLOWAI_EMAIL` and `FLOWAI_PASSWORD`. Use the local stack's demo user
+(`demo@flowai.test` / `password`); `FLOWAI_DASHBOARD_URL` must be one of FlowAI's
+`SANCTUM_STATEFUL_DOMAINS`. What FlowAI itself needs is in
+[FLOWAI_INTEGRATION.md](FLOWAI_INTEGRATION.md).
+
 ## Adding plain tools
 
 Quick actions that don't need a browser go straight in `backend/tools.py`:
@@ -178,6 +284,8 @@ async def get_weather(city: str):
 ## Layout
 
 ```
+Dockerfile     the agent as an image (GPU, or CPU with TORCH=cpu)
+docker-compose.yml  runs it: agent (GPU) or agent-cpu, with volumes for models and media
 backend/
   main.py      FastAPI app, model loading, /ws endpoint, serves web/
   session.py   per-connection pipeline: VAD → ASR → LLM/tools → TTS, barge-in
@@ -185,16 +293,23 @@ backend/
   asr.py       Nemotron 3.5 ASR (streaming + offline fallback)
   llm.py       Ollama cloud client
   tts.py       OmniVoice + sentence chunker
+  voicestudio.py  speech from a VoiceStudio server instead (TTS_URL)
   tools.py     tool registry (incl. browser_task / status / cancel)
   browser.py   shared Playwright browser + text view of the page
   browser_agent.py  the browser agent's LLM loop and tools
   skills.py    loads skills/*.md
   comfyui.py   client for the ComfyUI manager API on the pod
   media.py     per-conversation generation jobs, numbered media, uploads, adding workflows
+  studio.py    post drafts: slides, texts drawn with Pillow, versions and undo
+  platforms.py Instagram and X specs and the pre-export check (mirrors FlowAI's)
+  flowai.py    FlowAI: accounts and voice, saving, finding, opening and scheduling posts
 skills/        browser agent skills (markdown)
+  content/     content skills: how to make each kind of post
+fonts/         fonts for text on pictures (Geist and Instrument Serif, OFL)
 comfyui/       RunPod kit (manager.py, setup scripts, workflow bundles) + descriptions.yaml
-media/         generated and attached files (served at /media)
-web/           test UI (index.html, app.js, mic-worklet.js)
+media/         generated and attached files (served at media/, next to the page)
+web/           the agent page (index.html, agent.js), the test console (console.html, app.js),
+               the protocol client both use (voice.js), mic-worklet.js
 ```
 
 ## Tuning (`.env`)
@@ -207,8 +322,41 @@ web/           test UI (index.html, app.js, mic-worklet.js)
 - `TTS_DTYPE`: keep `float32` on GTX 16xx cards. They have no tensor cores, so fp16 is about 6× slower there, and
   OmniVoice produces garbled audio in fp16. `float16` is fine on RTX cards.
 - `LLM_THINK`: keep `low`. With `false`, GLM 5.3 Flash leaks its reasoning into the reply and it gets spoken.
+- `LLM_MODEL`: Ollama cloud models compared as the content-studio agent (October 2026). Each ran the same scripted
+  seven-turn conversation three times, through the real agent loop with stand-in pictures: a post, removing an
+  object, recolouring the headline, a shorter caption, undo, the X version, and a carousel.
+
+  | Model | `LLM_THINK` | Tasks right (of 6) | Malformed tool calls | Spoken reply | Notes |
+  |---|---|---|---|---|---|
+  | `deepseek-v4.1-flash` | `low` | 5, 6, 6 | none | ~200 chars | steadiest time to first word (worst 2 s); best captions |
+  | `gemma4:31b` | `false` | 5, 5, 6 | none | ~120 chars | shortest replies, the best fit for speech; sometimes changes both lines when asked for "the headline" |
+  | `glm-5.3-flash` | `low` | 6, 6, 6 | 1 to 5 a run | ~190 chars | most precise edits; recovers from its bad calls, which costs a round each |
+  | `gpt-oss:120b` | `low` | — | — | — | not usable here: described drafts it never made, left captions empty |
+
+  Qwen3.6 35B-A3B isn't on Ollama cloud. Locally it is a 22.6 GB download, more than a 16 GB card holds next
+  to the ASR and TTS models.
+
+  Since then a post is made in one `create_draft` call and the content skills sit in the prompt, so every
+  request in the script takes one tool round (two model calls), where a new post used to take five. Rerun on
+  that code, both models got all seven requests right with no tool errors. Time for the reply itself:
+
+  | Model | New post | Edits | Carousel |
+  |---|---|---|---|
+  | `gemma4:31b` | 2.1 s | 0.5 to 1.4 s | 4.8 s |
+  | `deepseek-v4.1-flash` | 4.8 s | 1.0 to 3.3 s | 8.2 s |
+
+  Gemma 4 is now the faster fit for a voice agent; DeepSeek still writes the stronger captions. DeepSeek
+  writes `&` as `&amp;` in tool calls, which the studio turns back into `&`. Prompt length barely matters: on
+  both models, going from 2k to 15k tokens of prompt added 0 to 0.4 s before the first word.
 - `TTS_REF_AUDIO` / `TTS_REF_TEXT`: clone a specific voice instead of the designed one.
+- `TTS_URL`, `TTS_API_KEY`, `TTS_VOICE`: speech from a VoiceStudio server (the same OmniVoice model, e.g. on a RunPod
+  GPU) instead of this PC. On an L40, a 5.8-second sentence came back in about 0.4 s, against about 4 s with
+  OmniVoice on a GTX 1660 Ti. The first request after VoiceStudio starts loads the model (about a minute); the agent
+  makes it at startup. `TTS_VOICE` is a VoiceStudio voice profile's name or id, or an OpenAI voice name (`alloy`,
+  the default, is the server's default voice).
 - `BROWSER_LLM_MODEL`: a different (e.g. bigger) model for the browser agent; each step is
   one LLM call, about 1 s with `glm-5.3-flash`.
 - `BROWSER_MAX_STEPS`: the agent gives up after this many steps.
 - `COMFYUI_TIMEOUT_MINUTES`: how long to wait for one generation (a video queued behind others can take a while).
+- `LLM_MAX_TOOL_ROUNDS`: tool-calling rounds per reply (default 12). A post or a carousel takes one; the rest is
+  room for longer chains (find a post, open it, change it, save it).

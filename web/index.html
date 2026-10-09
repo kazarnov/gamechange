@@ -3,106 +3,290 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Voice Agent</title>
+<title>FlowAI Assistant</title>
 <style>
+  /* The agent's own page, in FlowAI's dashboard look (content-generator/frontend/src/index.css),
+     as a working reference for the page FlowAI will host (FLOWAI_INTEGRATION.md, change 3). */
+  @font-face { font-family: "Geist"; src: url("fonts/Geist-SemiBold.ttf") format("truetype"); font-weight: 600; font-display: swap; }
+  @font-face { font-family: "Geist"; src: url("fonts/Geist-ExtraBold.ttf") format("truetype"); font-weight: 800; font-display: swap; }
+  @font-face { font-family: "Instrument Serif"; src: url("fonts/InstrumentSerif-Italic.ttf") format("truetype"); font-style: italic; font-display: swap; }
+  @font-face { font-family: "Geist Mono"; src: url("fonts/GeistMono-Medium.ttf") format("truetype"); font-weight: 500; font-display: swap; }
   :root {
-    --bg: #f6f6f4; --panel: #fff; --text: #1d1d1b; --muted: #6b6b66; --line: #e3e3de;
-    --accent: #2f6fde; --user: #e8effc; --bot: #f1f1ee; --tool: #fdf6e3; --danger: #c8412f;
-    color-scheme: light;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #151515; --panel: #1e1e1d; --text: #ececea; --muted: #9a9a94; --line: #2e2e2c;
-      --accent: #6a9cf5; --user: #1f2b42; --bot: #262624; --tool: #2f2a1b; --danger: #ef6b58;
-      color-scheme: dark;
-    }
+    --ink: #050505; --panel: #0b0b0c; --panel-2: #0f0f11; --card: #101010; --card-2: #151516;
+    --line: rgb(255 255 255 / .08); --line-2: rgb(255 255 255 / .14);
+    --fg: #f5f4f0; --muted: #a1a1aa; --dim: #6b6b73;
+    --accent: #6366f1; --accent-2: #8b5cf6; --accent-soft: #a5b4fc; --on-accent: #fff;
+    --ok: #5ee39a; --warn: #f5b04c; --fail: #f87171;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --head: "Geist", var(--sans);
+    --serif: "Instrument Serif", Georgia, serif;
+    --mono: "Geist Mono", ui-monospace, SFMono-Regular, monospace;
+    color-scheme: dark;
   }
   * { box-sizing: border-box; }
-  body { margin: 0; font: 15px/1.5 system-ui, sans-serif; background: var(--bg); color: var(--text); }
-  main { max-width: 760px; margin: 0 auto; padding: 24px 16px; display: flex; flex-direction: column; gap: 16px; min-height: 100vh; }
-  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-  h1 { font-size: 18px; margin: 0; }
-  .status { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
-  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--line); transition: background .15s; }
-  .dot.listening { background: #3aa65b; }
-  .dot.hearing { background: #e5a50a; box-shadow: 0 0 0 4px #e5a50a33; }
-  .dot.thinking { background: var(--accent); }
-  .dot.speaking { background: #9b51e0; box-shadow: 0 0 0 4px #9b51e033; }
-  .controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-  button { font: inherit; border: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 8px 14px; border-radius: 8px; cursor: pointer; }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  button.primary.on { background: var(--danger); border-color: var(--danger); }
-  button:disabled { opacity: .5; cursor: default; }
-  label { font-size: 13px; color: var(--muted); display: inline-flex; gap: 6px; align-items: center; }
-  #log { flex: 1; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; min-height: 300px; max-height: 62vh; }
-  .msg { padding: 8px 12px; border-radius: 10px; max-width: 85%; white-space: pre-wrap; word-wrap: break-word; }
-  .user { background: var(--user); align-self: flex-end; }
-  .user.partial { opacity: .6; font-style: italic; }
-  .bot { background: var(--bot); align-self: flex-start; }
-  .bot.cut::after { content: " ✂"; color: var(--muted); }
-  .tool { background: var(--tool); align-self: flex-start; font: 12px/1.4 ui-monospace, monospace; }
-  .sys { align-self: center; font-size: 12px; color: var(--muted); }
-  .err { align-self: center; font-size: 13px; color: var(--danger); }
-  form { display: flex; gap: 8px; }
-  input[type=text] { flex: 1; min-width: 0; font: inherit; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--text); }
-  #browser { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
-  #browser .head { display: flex; align-items: center; gap: 8px; justify-content: space-between; flex-wrap: wrap; font-size: 13px; }
-  #browser .task { font-weight: 600; overflow-wrap: anywhere; }
-  #browser .badge { font-size: 12px; padding: 2px 8px; border-radius: 99px; background: var(--line); color: var(--muted); }
-  #browser .badge.running { background: var(--accent); color: #fff; }
-  #browser .badge.done { background: #3aa65b; color: #fff; }
-  #browser .badge.failed, #browser .badge.cancelled { background: var(--danger); color: #fff; }
-  #browser img { width: 100%; max-height: 320px; object-fit: contain; object-position: top; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
-  #steps { margin: 0; padding-left: 20px; font: 12px/1.5 ui-monospace, monospace; color: var(--muted); max-height: 120px; overflow-y: auto; }
-  #steps li { overflow-wrap: anywhere; }
-  .media { display: flex; flex-direction: column; gap: 6px; white-space: normal; }
-  .media img, .media video { display: block; max-width: 100%; max-height: 420px; border-radius: 8px; background: var(--line); }
-  .media audio { max-width: 100%; }
-  .media .cap { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
-  .media .cap b { color: var(--text); font-weight: 600; }
-  .media.pending .cap b::after { content: " ●"; color: var(--accent); animation: pulse 1s infinite alternate; }
-  .media.failed .cap b { color: var(--danger); }
-  @keyframes pulse { from { opacity: .2; } to { opacity: 1; } }
-  #attach { padding: 8px 11px; }
-  body.dropping #log { outline: 2px dashed var(--accent); outline-offset: -6px; }
-  #meter { width: 80px; height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
-  #meter > div { height: 100%; width: 0; background: #3aa65b; transition: width .05s; }
+  html, body { margin: 0; background: var(--ink); color: var(--fg); }
+  body { font: 14px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
+  button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+  button:disabled { opacity: .4; cursor: default; }
+  a { color: inherit; }
+  svg { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+  [hidden] { display: none !important; }
+
+  .app { display: grid; grid-template-columns: minmax(300px, 360px) minmax(0, 1fr) minmax(250px, 300px); grid-template-rows: auto minmax(0, 1fr); height: 100dvh; }
+
+  /* --- top bar --- */
+  .top { grid-column: 1 / -1; display: flex; align-items: center; gap: 16px; padding: 10px 20px; border-bottom: 1px solid var(--line); background: var(--panel); min-width: 0; }
+  .brand { font: 600 15px var(--head); letter-spacing: -.01em; display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+  .brand .mark { width: 18px; height: 18px; border-radius: 5px; background: linear-gradient(135deg, var(--accent), var(--accent-2)); }
+  .brand em { font: italic 400 19px var(--serif); color: var(--accent-soft); }
+  .accounts { display: flex; gap: 6px; flex-wrap: wrap; min-width: 0; flex: 1; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 99px; padding: 3px 10px; white-space: nowrap; }
+  .chip .p { font: 500 10px var(--mono); text-transform: uppercase; letter-spacing: .08em; color: var(--dim); }
+  .chip.off { color: var(--warn); border-color: rgb(245 176 76 / .3); }
+  a.ghost, a.primary { text-decoration: none; }
+  .ghost { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; white-space: nowrap; }
+  .ghost:hover:not(:disabled) { color: var(--fg); border-color: var(--line-2); }
+  .primary { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; background: var(--accent); color: var(--on-accent); border-radius: 8px; padding: 6px 12px; white-space: nowrap; }
+  .primary:hover:not(:disabled) { background: #5558e8; }
+
+  /* --- conversation --- */
+  .talk { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--line); background: var(--panel); }
+  .label { font: 500 10.5px var(--mono); text-transform: uppercase; letter-spacing: .12em; color: var(--dim); }
+  .talk-head { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px 10px; }
+  .log { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 18px 18px; display: flex; flex-direction: column; gap: 8px; }
+  .msg { max-width: 88%; padding: 8px 12px; border-radius: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .msg.user { align-self: flex-end; background: rgb(99 102 241 / .16); border: 1px solid rgb(99 102 241 / .25); border-bottom-right-radius: 4px; }
+  .msg.user.partial { opacity: .6; font-style: italic; }
+  .msg.bot { align-self: flex-start; background: var(--card-2); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+  .msg.bot.cut::after { content: " …"; color: var(--dim); }
+  .act { display: flex; gap: 8px; align-items: baseline; font-size: 12px; color: var(--dim); padding-left: 2px; }
+  .act::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--line-2); flex: none; transform: translateY(-1px); }
+  .act.done::before { background: var(--accent-soft); }
+  .act.bad { color: var(--fail); }
+  .act.bad::before { background: var(--fail); }
+  .act .why { color: var(--muted); }
+  .sys { align-self: center; font-size: 12px; color: var(--dim); text-align: center; }
+  .err { align-self: stretch; font-size: 12.5px; color: var(--fail); background: rgb(248 113 113 / .08); border: 1px solid rgb(248 113 113 / .2); border-radius: 8px; padding: 6px 10px; }
+  .hint { color: var(--dim); font-size: 13px; padding: 8px 0; }
+
+  .composer { border-top: 1px solid var(--line); padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 10px; background: var(--panel); }
+  .voice { display: flex; align-items: center; gap: 12px; }
+  .mic { width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center; background: var(--accent); color: var(--on-accent); box-shadow: 0 0 0 0 rgb(99 102 241 / .35); transition: background .15s, box-shadow .08s; flex: none; }
+  .mic svg { width: 22px; height: 22px; }
+  .mic.on { background: #e5484d; }
+  .voice-state { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+  .voice-state b { font: 600 14px var(--head); }
+  .voice-state span { font-size: 12px; color: var(--dim); }
+  .selection { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--accent-soft); background: rgb(99 102 241 / .1); border: 1px solid rgb(99 102 241 / .25); border-radius: 8px; padding: 5px 8px; }
+  .selection span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .selection button { color: var(--muted); display: grid; }
+  form { display: flex; gap: 6px; align-items: center; }
+  form input[type=text] { flex: 1; min-width: 0; font: inherit; color: var(--fg); background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; outline: none; }
+  form input[type=text]:focus { border-color: rgb(99 102 241 / .6); }
+  .icon { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 8px; color: var(--muted); border: 1px solid var(--line); flex: none; }
+  .icon:hover { color: var(--fg); border-color: var(--line-2); }
+  .options { display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: var(--dim); }
+  .options label { display: inline-flex; gap: 6px; align-items: center; }
+  .options button { color: var(--dim); }
+  .options button:hover { color: var(--fg); }
+
+  /* --- stage: the draft as it will look --- */
+  .stage { overflow-y: auto; padding: 22px 24px 40px; display: flex; flex-direction: column; align-items: center; gap: 16px; min-width: 0; }
+  .stage > * { width: 100%; max-width: 640px; }
+  .approval { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; background: rgb(99 102 241 / .1); border: 1px solid rgb(99 102 241 / .35); border-radius: 12px; padding: 12px 14px; }
+  .approval .what { flex: 1; min-width: 200px; }
+  .approval .what b { display: block; font: 600 12px var(--head); color: var(--accent-soft); letter-spacing: .02em; }
+  .approval.closed { background: var(--card); border-color: var(--line); color: var(--muted); }
+  .approval.closed b { color: var(--dim); }
+  .approval.approved b { color: var(--ok); }
+  .approval.failed b { color: var(--fail); }
+  .draft-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
+  .draft-head h2 { margin: 0; font: 600 20px/1.2 var(--head); letter-spacing: -.02em; }
+  .draft-head .meta { font: 500 11px var(--mono); color: var(--dim); text-transform: uppercase; letter-spacing: .08em; margin-top: 4px; }
+  .bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .saved { display: inline-flex; gap: 6px; align-items: center; font-size: 12.5px; color: var(--ok); }
+  .saved.stale { color: var(--warn); }
+  .jobs { display: flex; gap: 8px; flex-wrap: wrap; }
+  .job { display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--accent-soft); border: 1px solid rgb(99 102 241 / .3); border-radius: 99px; padding: 4px 12px; }
+  .job::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--accent-soft); animation: pulse 1s infinite alternate; }
+  .job.failed { color: var(--fail); border-color: rgb(248 113 113 / .3); }
+  .job.failed::before { background: var(--fail); animation: none; }
+  @keyframes pulse { from { opacity: .25; } to { opacity: 1; } }
+
+  .post { background: var(--panel-2); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; margin: 0 auto; }
+  .post.ig { max-width: 440px; }
+  .post.story { max-width: 340px; border-radius: 20px; }
+  .post.x { max-width: 560px; display: flex; gap: 12px; padding: 16px; }
+  .avatar { width: 30px; height: 30px; border-radius: 50%; flex: none; background: conic-gradient(from 210deg, #f5b04c, #e87ba4, var(--accent-2), #f5b04c); padding: 2px; }
+  .avatar::after { content: ""; display: block; width: 100%; height: 100%; border-radius: 50%; background: radial-gradient(circle at 40% 35%, #d6c2a8, #6f5a46); border: 2px solid var(--panel-2); }
+  .ig-head { display: flex; align-items: center; gap: 10px; padding: 10px 12px; font: 600 13px var(--head); }
+  .ig-actions { display: flex; gap: 14px; padding: 10px 12px 4px; }
+  .ig-actions svg, .x-actions svg { width: 20px; height: 20px; }
+  .ig-actions .end { margin-left: auto; }
+  .caption { padding: 4px 12px 14px; font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .caption .who { font-weight: 600; margin-right: 4px; }
+  .caption.empty, .x-text.empty { color: var(--dim); font-style: italic; }
+  .caption .more { color: var(--dim); cursor: pointer; }
+  mark.over { background: rgb(248 113 113 / .28); color: var(--fg); border-radius: 2px; }
+  .x-body { flex: 1; min-width: 0; }
+  .x-head { font-size: 13.5px; display: flex; gap: 6px; flex-wrap: wrap; }
+  .x-head b { font-family: var(--head); }
+  .x-head span { color: var(--dim); }
+  .x-text { margin: 4px 0 10px; font-size: 14.5px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .x-media { display: grid; gap: 2px; border-radius: 16px; overflow: hidden; border: 1px solid var(--line); }
+  .x-media.many { grid-template-columns: 1fr 1fr; }
+  .x-actions { display: flex; justify-content: space-between; color: var(--dim); padding: 12px 24px 0 0; }
+
+  .frame { position: relative; width: 100%; background: #000; overflow: hidden; cursor: pointer; }
+  .frame > img, .frame > video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; }
+  .frame.picked { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .hit { position: absolute; border-radius: 6px; border: 1.5px dashed transparent; transition: border-color .12s, background .12s; }
+  .frame:hover .hit { border-color: rgb(255 255 255 / .35); }
+  .hit:hover { background: rgb(99 102 241 / .12); border-color: var(--accent-soft) !important; }
+  .hit.on { border: 2px solid var(--accent) !important; background: rgb(99 102 241 / .12); }
+  .hit .tag { position: absolute; left: -2px; top: -22px; font: 500 10.5px var(--mono); background: var(--accent); color: var(--on-accent); border-radius: 5px 5px 5px 0; padding: 2px 6px; white-space: nowrap; display: none; }
+  .hit.on .tag, .hit:hover .tag { display: block; }
+  .nav { position: absolute; top: 50%; transform: translateY(-50%); width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; background: rgb(255 255 255 / .85); color: #111; }
+  .nav.prev { left: 8px; } .nav.next { right: 8px; }
+  .dots { display: flex; justify-content: center; gap: 4px; padding-top: 8px; }
+  .dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--line-2); }
+  .dots i.on { background: var(--accent-soft); }
+  .count { position: absolute; right: 10px; top: 10px; font: 500 11px var(--mono); background: rgb(0 0 0 / .6); border-radius: 99px; padding: 2px 8px; }
+  .bars { position: absolute; left: 8px; right: 8px; top: 8px; display: flex; gap: 3px; pointer-events: none; }
+  .bars i { flex: 1; height: 2.5px; border-radius: 2px; background: rgb(255 255 255 / .45); }
+  .bars i.on { background: #fff; }
+  .story-head { position: absolute; left: 10px; top: 18px; display: flex; align-items: center; gap: 8px; font: 600 12.5px var(--head); text-shadow: 0 1px 3px #0008; pointer-events: none; }
+
+  .checks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; }
+  .checks li { display: flex; gap: 8px; align-items: baseline; color: var(--muted); }
+  .checks li::before { content: ""; width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--ok); }
+  .checks li.warn::before { background: var(--warn); }
+  .checks li.fail::before { background: var(--fail); }
+  .checks li.fail { color: var(--fg); }
+
+  .empty-stage { margin: auto 0; text-align: center; padding: 40px 0; }
+  .empty-stage h1 { font: 600 28px/1.15 var(--head); letter-spacing: -.03em; margin: 0 0 8px; }
+  .empty-stage h1 em { font: italic 400 34px var(--serif); color: var(--accent-soft); }
+  .empty-stage p { color: var(--muted); margin: 0 0 20px; }
+  .ideas { display: flex; flex-direction: column; gap: 8px; align-items: center; }
+  .idea { font-size: 13.5px; color: var(--muted); border: 1px solid var(--line); border-radius: 10px; padding: 9px 14px; max-width: 100%; text-align: left; background: var(--panel); }
+  .idea:hover { color: var(--fg); border-color: var(--line-2); }
+
+  /* --- side: drafts, FlowAI posts, pictures --- */
+  .side { overflow-y: auto; border-left: 1px solid var(--line); padding: 16px; display: flex; flex-direction: column; gap: 22px; background: var(--panel); }
+  .side section { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .side .none { font-size: 12.5px; color: var(--dim); }
+  .row { display: flex; gap: 10px; align-items: center; width: 100%; text-align: left; border: 1px solid var(--line); border-radius: 10px; padding: 8px; background: var(--card); }
+  .row:hover { border-color: var(--line-2); }
+  .row.on { border-color: rgb(99 102 241 / .6); background: rgb(99 102 241 / .08); }
+  .row .thumb { width: 40px; height: 40px; border-radius: 6px; object-fit: cover; background: var(--card-2); flex: none; }
+  .row .txt { min-width: 0; flex: 1; display: flex; flex-direction: column; }
+  .row .txt b { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .txt span { font-size: 11.5px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .status { font: 500 10px var(--mono); text-transform: uppercase; letter-spacing: .08em; border-radius: 99px; padding: 2px 7px; border: 1px solid var(--line-2); color: var(--muted); flex: none; }
+  .status.scheduled { color: var(--accent-soft); border-color: rgb(165 180 252 / .35); }
+  .status.published { color: var(--ok); border-color: rgb(94 227 154 / .35); }
+  .status.failed { color: var(--fail); border-color: rgb(248 113 113 / .35); }
+  .row .out { color: var(--dim); display: grid; padding: 4px; }
+  .row .out:hover { color: var(--fg); }
+  .pictures { display: grid; grid-template-columns: repeat(auto-fill, minmax(72px, 1fr)); gap: 6px; }
+  .pic { position: relative; aspect-ratio: 1; border-radius: 8px; overflow: hidden; background: var(--card-2); border: 1px solid var(--line); }
+  .pic img, .pic video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .pic b { position: absolute; left: 4px; top: 4px; font: 500 10.5px var(--mono); background: rgb(0 0 0 / .65); border-radius: 5px; padding: 1px 5px; }
+  body.dropping .stage { outline: 2px dashed var(--accent); outline-offset: -10px; }
+
+  @media (max-width: 1180px) {
+    .app { grid-template-columns: minmax(280px, 340px) minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto; }
+    .side { grid-column: 1 / -1; border-left: 0; border-top: 1px solid var(--line); display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: start; }
+  }
+  @media (max-width: 760px) {
+    .app { display: flex; flex-direction: column; height: auto; min-height: 100dvh; }
+    .top { padding: 10px 16px; flex-wrap: wrap; }
+    .stage { order: 1; padding: 16px 16px 24px; overflow: visible; }
+    .talk { order: 2; border-right: 0; border-top: 1px solid var(--line); }
+    .log { max-height: 46vh; padding: 4px 16px 16px; }
+    /* The mic stays in reach while scrolling; agent.js keeps --composer-h at its height */
+    .composer { position: fixed; left: 0; right: 0; bottom: 0; z-index: 5; padding: 10px 16px 12px; box-shadow: 0 -10px 30px rgb(0 0 0 / .6); }
+    body { padding-bottom: var(--composer-h, 170px); }
+    .side { order: 3; display: flex; padding: 16px; }
+  }
 </style>
 </head>
 <body>
-<main>
-  <header>
-    <h1>Voice Agent</h1>
-    <span class="status"><span id="dot" class="dot"></span><span id="state">disconnected</span><span id="meter"><div></div></span></span>
+<div class="app">
+  <header class="top">
+    <div class="brand"><span class="mark"></span>FlowAI <em>Assistant</em></div>
+    <div class="accounts" id="accounts"></div>
+    <a class="ghost" id="flowai-link" target="_blank" rel="noopener" hidden>Open FlowAI</a>
   </header>
 
-  <div class="controls">
-    <button id="mic" class="primary">Start talking</button>
-    <button id="stop" title="Stop the assistant">Interrupt</button>
-    <button id="reset" title="Clear conversation history">Reset</button>
-    <label title="When off, your mic is muted while the assistant speaks (use if you have no headphones)">
-      <input type="checkbox" id="bargein" checked> Allow interrupting by voice
-    </label>
-  </div>
-
-  <section id="browser" hidden>
-    <div class="head">
-      <span>Browser · <span class="task" id="btask"></span></span>
-      <span><span class="badge" id="bstatus"></span> <button id="bcancel" type="button">Cancel task</button></span>
+  <aside class="talk" aria-label="Conversation">
+    <div class="talk-head"><span class="label">Conversation</span><span class="label" id="conn">connecting…</span></div>
+    <div class="log" id="log" aria-live="polite"></div>
+    <div class="composer">
+      <div class="voice">
+        <button class="mic" id="mic" aria-label="Start talking">
+          <svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+        </button>
+        <div class="voice-state"><b id="state">Tap to talk</b><span id="state-hint">or type below. You can talk over the assistant.</span></div>
+        <button class="icon" id="stop" title="Stop the assistant" hidden>
+          <svg viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="1.5"/></svg>
+        </button>
+      </div>
+      <div class="selection" id="selection" hidden>
+        <span id="selection-text"></span>
+        <button id="selection-clear" title="Clear the selection"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      </div>
+      <form id="form">
+        <button class="icon" id="attach" type="button" title="Attach a picture or video (or paste / drop one anywhere)">
+          <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+        <input id="file" type="file" accept="image/*,video/*" multiple hidden>
+        <input id="text" type="text" placeholder="Type a message…" autocomplete="off">
+        <button class="icon" type="submit" title="Send">
+          <svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+        </button>
+      </form>
+      <div class="options">
+        <label title="Off: your mic is muted while the assistant speaks (use it without headphones)"><input type="checkbox" id="bargein" checked> Interrupt by voice</label>
+        <button id="reset" title="Start over: clears the conversation and its drafts (saved posts stay in FlowAI)">New session</button>
+      </div>
     </div>
-    <img id="bshot" alt="Screenshot of the browser" hidden>
-    <ol id="steps"></ol>
-  </section>
+  </aside>
 
-  <div id="log" aria-live="polite"></div>
+  <main class="stage" id="stage">
+    <div id="approvals"></div>
+    <div class="empty-stage" id="empty">
+      <h1>What are we <em>posting</em> today?</h1>
+      <p>Say it or type it. The draft shows up here as it will look, and you can keep changing it by voice.</p>
+      <div class="ideas" id="ideas"></div>
+    </div>
+    <div id="draft" hidden>
+      <div class="draft-head">
+        <div><h2 id="draft-title"></h2><div class="meta" id="draft-meta"></div></div>
+        <div class="bar">
+          <span class="saved" id="saved" hidden></span>
+          <button class="ghost" id="undo" title="Back to the previous version">
+            <svg viewBox="0 0 24 24"><path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/></svg>Undo
+          </button>
+          <button class="primary" id="save"><svg viewBox="0 0 24 24"><path d="M5 12l4 4L19 6"/></svg><span>Save to FlowAI</span></button>
+          <a class="ghost" id="open-post" target="_blank" rel="noopener" hidden>
+            Composer<svg viewBox="0 0 24 24"><path d="M7 17L17 7M9 7h8v8"/></svg>
+          </a>
+        </div>
+      </div>
+    </div>
+    <div class="jobs" id="jobs"></div>
+    <div id="preview"></div>
+    <ul class="checks" id="checks"></ul>
+  </main>
 
-  <form id="form">
-    <button id="attach" type="button" title="Attach a picture, video or ComfyUI workflow (.json). You can also paste or drop files.">📎</button>
-    <input id="file" type="file" accept="image/*,video/*,audio/*,.json,application/json" multiple hidden>
-    <input id="text" type="text" placeholder="…or type a message" autocomplete="off">
-    <button type="submit">Send</button>
-  </form>
-</main>
-<script src="app.js"></script>
+  <aside class="side" aria-label="Drafts, posts and pictures">
+    <section><span class="label">Drafts</span><div id="drafts"><div class="none">Nothing yet.</div></div></section>
+    <section><span class="label">In FlowAI</span><div id="posts"><div class="none" id="posts-none">Recent posts show up here.</div></div></section>
+    <section><span class="label">Pictures</span><div class="pictures" id="pictures"></div><div class="none" id="pictures-none">Generated and attached pictures, numbered.</div></section>
+  </aside>
+</div>
+<script type="module" src="agent.js"></script>
 </body>
 </html>
