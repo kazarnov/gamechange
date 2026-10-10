@@ -48,6 +48,7 @@ class MediaItem:
     workflow: str = ""
     prompt: str = ""
     data: dict | None = None  # the JSON of an attached workflow file
+    meta: dict | None = None  # width, height and duration of a video made here (reel.py)
 
     def event(self, job: int | None = None) -> dict:
         return {"type": "media", "id": self.id, "kind": self.kind, "name": self.name, "source": self.source,
@@ -58,9 +59,11 @@ class MediaItem:
 @dataclass
 class MediaJob:
     id: int
-    kind: str  # generate | install
+    kind: str  # generate | install | render (made here, e.g. a video: reel.py)
     workflow: str
     prompt: str = ""
+    label: str = ""  # what the page shows while it runs, e.g. "Editing the painted area"
+    makes: str = "image"
     task: asyncio.Task | None = None
     status: str = "running"  # running | done | failed | cancelled
     started: float = field(default_factory=time.monotonic)
@@ -203,6 +206,13 @@ class MediaSession:
                  if w.ready and w.output == "image" and not w.media_inputs] if self.comfy else []
         return found[0] if found else None
 
+    def edit_workflow(self) -> str | None:
+        """The picture-editing workflow (a picture and an instruction in, a picture out)."""
+        found = [w.name for w in self.comfy.workflows.values()
+                 if w.ready and w.output == "image" and w.media_inputs == ["image"]] if self.comfy else []
+        found.sort(key=lambda n: "edit" not in n)
+        return found[0] if found else None
+
     async def _workflow(self, name: str):
         self._pod()
         wf = self.comfy.workflows.get(name)
@@ -217,10 +227,11 @@ class MediaSession:
         return wf
 
     async def generate(self, workflow: str, prompt: str, image=None, options=None, *, ratio: float | None = None,
-                       source: str | None = None, then=None) -> dict:
+                       source: str | None = None, then=None, transform=None, label: str = "") -> dict:
         """ratio: the shape to make (width ÷ height) when the workflow has a size the options don't set.
         source: the picture an editing workflow edits when no image is given (instead of the latest).
-        then: see MediaJob.then."""
+        then: see MediaJob.then. transform: made pictures go through it before they are kept (in a
+        thread): bytes -> (bytes, file name), e.g. to paste an edited part back into the whole."""
         try:
             wf = await self._workflow(str(workflow))
             if isinstance(options, str):
@@ -259,18 +270,18 @@ class MediaSession:
             return {"error": str(exc)}
 
         self.job_count += 1
-        job = MediaJob(self.job_count, "generate", wf.name, prompt, then=then)
+        job = MediaJob(self.job_count, "generate", wf.name, prompt, label=label, makes=wf.output, then=then)
         self.jobs[job.id] = job
-        job.task = asyncio.create_task(self._run_generation(job, inputs, wf.output))
+        job.task = asyncio.create_task(self._run_generation(job, inputs, transform))
         reply = {"job": job.id, "status": "started", "makes": wf.output,
                  "expected_time": "several minutes" if wf.output == "video" else "a few seconds"}
         if [i for i in used if i]:
             reply["input"] = ", ".join(f"{i.kind} number {i.id}" for i in used if i)
         return reply
 
-    async def _run_generation(self, job: MediaJob, inputs: dict, output: str):
+    async def _run_generation(self, job: MediaJob, inputs: dict, transform=None):
         await self.send(type="media_job", id=job.id, kind="generate", status="started",
-                        workflow=job.workflow, prompt=job.prompt, makes=output)
+                        workflow=job.workflow, prompt=job.prompt, makes=job.makes, label=job.label)
         try:
             queued = await self.comfy.run(job.workflow, inputs)
             if queued.get("status") == "setting_up":
@@ -282,9 +293,11 @@ class MediaSession:
                 raise ComfyError("it finished without producing any file")
             made = []
             for f in files:
-                data = await self.comfy.download(f["url"])
-                item = await self._store(data, f.get("filename") or "output", file_kind(f.get("filename", "")),
-                                         "generated", workflow=job.workflow, prompt=job.prompt)
+                data, name = await self.comfy.download(f["url"]), f.get("filename") or "output"
+                if transform and file_kind(name) == "image":
+                    data, name = await asyncio.to_thread(transform, data)
+                item = await self._store(data, name, file_kind(name), "generated", workflow=job.workflow,
+                                         prompt=job.prompt)
                 made.append(item)
                 await self.send(**item.event(job.id))
             job.status = "done"
@@ -336,6 +349,65 @@ class MediaSession:
             if res.get("status") == "error":
                 raise ComfyError(describe_error(res.get("messages")))
         raise ComfyError(f"no result after {_seconds(self.timeout_s)}; the pod may have restarted")
+
+    # --- made here ------------------------------------------------------------------
+
+    def render(self, label: str, prompt: str, work, then=None) -> dict:
+        """A file made on this machine in the background, like a generation: work(progress) runs in a
+        thread and returns (bytes, file name, meta); progress(share) may be called with 0..1."""
+        running = [j for j in self.jobs.values() if j.kind == "render" and j.status == "running"]
+        if len(running) >= 2:
+            return {"error": "two videos are already being made; wait for one to finish"}
+        self.job_count += 1
+        job = MediaJob(self.job_count, "render", "voiceover video", prompt, label=label, makes="video", then=then)
+        self.jobs[job.id] = job
+        job.task = asyncio.create_task(self._run_render(job, work))
+        return {"job": job.id, "status": "started", "makes": "video"}
+
+    async def _run_render(self, job: MediaJob, work):
+        loop = asyncio.get_running_loop()
+        shown = -1
+
+        def progress(share: float):  # from the worker thread
+            nonlocal shown
+            if job.status != "running":
+                raise RuntimeError("cancelled")  # stops the worker
+            pct = int(max(0, min(share, 1)) * 100) // 5 * 5
+            if pct != shown:
+                shown = pct
+                job.progress = f"{pct}%"
+                asyncio.run_coroutine_threadsafe(self.send(type="media_job", id=job.id, kind="generate",
+                                                           status="running", text=job.progress), loop)
+
+        await self.send(type="media_job", id=job.id, kind="generate", status="started", workflow=job.workflow,
+                        prompt=job.prompt, makes="video", label=job.label)
+        try:
+            data, name, meta = await asyncio.to_thread(work, progress)
+            item = await self._store(data, name, "video", "generated", workflow=job.workflow, prompt=job.prompt,
+                                     meta=meta)
+            await self.send(**item.event(job.id))
+            job.status, job.result = "done", f"video number {item.id}"
+            then = ""
+            if job.then:
+                try:
+                    then = await job.then([item])
+                except Exception:
+                    log.exception("render %d: follow-up failed", job.id)
+            took = _seconds(time.monotonic() - job.started)
+            await self.send(type="media_job", id=job.id, kind="generate", status="done", text=f"took {took}")
+            note = f"The video ({job.result}) was made in {took} and is on the user's screen. {then} " \
+                   "Tell the user it is ready in one short sentence."
+        except asyncio.CancelledError:
+            job.status, job.result = "cancelled", "cancelled"
+            await self.send(type="media_job", id=job.id, kind="generate", status="cancelled")
+            raise
+        except Exception as exc:
+            log.exception("render %d failed", job.id)
+            job.status, job.result = "failed", str(exc)
+            await self.send(type="media_job", id=job.id, kind="generate", status="failed", text=str(exc))
+            note = f"Making the video failed: {exc}. Tell the user briefly."
+        log.info("render %d %s in %.1f s: %s", job.id, job.status, time.monotonic() - job.started, job.result)
+        self.notify(note)
 
     # --- workflows ------------------------------------------------------------------
 
@@ -478,7 +550,8 @@ class MediaSession:
         return {"count": self.item_count, "jobs": self.job_count,
                 "items": [{"id": i.id, "kind": i.kind, "name": i.name, "source": i.source,
                            "file": i.path.name if i.path else None, "workflow": i.workflow, "prompt": i.prompt,
-                           **({"data": i.data} if i.data is not None else {})}
+                           **({"data": i.data} if i.data is not None else {}),
+                           **({"meta": i.meta} if i.meta else {})}
                           for i in self.items.values()]}
 
     def restore(self, data: dict):
@@ -489,16 +562,14 @@ class MediaSession:
             if path and not path.is_file():
                 continue  # gone from MEDIA_DIR: its number stays taken
             self.items[i["id"]] = MediaItem(i["id"], i["kind"], i["name"], i["source"], path,
-                                            i.get("workflow", ""), i.get("prompt", ""), i.get("data"))
+                                            i.get("workflow", ""), i.get("prompt", ""), i.get("data"), i.get("meta"))
 
     def running(self) -> list[dict]:
-        """Generations still going, as the page shows them when the conversation is reopened."""
-        def makes(name: str) -> str:
-            wf = self.comfy.workflows.get(name) if self.comfy else None
-            return wf.output if wf else "image"
+        """Generations and videos still going, as the page shows them when the conversation is reopened."""
         return [{"type": "media_job", "id": j.id, "kind": "generate", "status": "started", "workflow": j.workflow,
-                 "prompt": j.prompt, "makes": makes(j.workflow), "seconds": round(time.monotonic() - j.started)}
-                for j in self.jobs.values() if j.kind == "generate" and j.status == "running"]
+                 "prompt": j.prompt, "makes": j.makes, "label": j.label,
+                 "seconds": round(time.monotonic() - j.started)}
+                for j in self.jobs.values() if j.kind in ("generate", "render") and j.status == "running"]
 
     # --- status / cancel ------------------------------------------------------------
 
@@ -508,7 +579,7 @@ class MediaSession:
         return {"jobs": [j.info() for j in shown]} if shown else {"jobs": [], "note": "nothing has been started"}
 
     async def cancel(self, job_id=None) -> dict:
-        running = [j for j in self.jobs.values() if j.kind == "generate" and j.status == "running"]
+        running = [j for j in self.jobs.values() if j.kind in ("generate", "render") and j.status == "running"]
         if job_id not in (None, ""):
             number = re.search(r"\d+", str(job_id))
             job = self.jobs.get(int(number.group())) if number else None
@@ -521,7 +592,7 @@ class MediaSession:
         return {"job": job.id, "status": "cancelled", "pod": await self._stop(job)}
 
     async def _stop(self, job: MediaJob) -> str:
-        pod = "not queued on the pod yet"
+        pod = "made here, stopped" if job.kind == "render" else "not queued on the pod yet"
         if job.prompt_id:
             try:
                 pod = (await self.comfy.cancel(job.prompt_id)).get("status", "?")

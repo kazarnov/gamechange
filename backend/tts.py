@@ -27,6 +27,11 @@ def _words(text: str) -> list[str]:
 
 
 class TTSEngine:
+    """One voice, designed from TTS_VOICE_INSTRUCT or cloned from TTS_REF_AUDIO: nothing to pick
+    (voicestudio.py offers a choice). The voice calls match VoiceStudioTTS's."""
+
+    choosable = False
+
     def __init__(self, model_id: str, device: str, dtype: torch.dtype, num_step: int, speed: float,
                  voice_instruct: str, ref_audio: str = "", ref_text: str = "",
                  transcribe: Callable[[np.ndarray], str] | None = None):
@@ -37,6 +42,8 @@ class TTSEngine:
         self.transcribe = transcribe
         self.lock = threading.Lock()  # one synthesis at a time on the GPU
         self.voice = self._load_voice(voice_instruct, ref_audio, ref_text)
+        self.default = {"id": "local", "name": "This computer’s voice", "language": "", "archetype": None,
+                        "description": "Cloned from your recording" if ref_audio else voice_instruct}
         self.synthesize("Warming up.")  # first call pays CUDA init costs
         log.info("TTS loaded (%s)", model_id)
 
@@ -79,13 +86,25 @@ class TTSEngine:
             log.warning("Best designed voice only scored %.2f; consider TTS_REF_AUDIO", best_score)
         return best
 
-    def synthesize(self, text: str) -> np.ndarray:
-        """Returns float32 mono audio at 24 kHz."""
+    def synthesize(self, text: str, voice: str | None = None) -> np.ndarray:
+        """Returns float32 mono audio at 24 kHz, always in the one voice."""
         with self.lock, torch.inference_mode():
             audio = self.model.generate(
                 text=text, voice_clone_prompt=self.voice, num_step=self.num_step, speed=self.speed
             )[0]
         return np.asarray(audio, dtype=np.float32)
+
+    def profiles(self) -> list[dict]:
+        return [self.default]
+
+    def catalog(self, q: str = "", lang: str = "", exclude: set[str] = frozenset()) -> tuple[list[dict], int, list[str]]:
+        return [], 0, []
+
+    def adopt(self, archetype: str) -> dict:
+        raise ValueError("voices can only be picked with a VoiceStudio server (TTS_URL)")
+
+    def sample(self, voice: str | None = None, archetype: str | None = None) -> np.ndarray:
+        return self.synthesize(REFERENCE_TEXT)
 
 
 _MARKDOWN = re.compile(r"[*_`#>|~]+|\[([^\]]*)\]\([^)]*\)")

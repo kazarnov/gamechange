@@ -337,7 +337,9 @@ class FlowAISession:
             "a whole campaign's posts here to change them, and find_assets and use_assets bring pictures from the "
             "FlowAI gallery into this conversation. To schedule a post, call schedule_post with the time the user "
             "wants: they approve it on screen with one click and nothing is booked before that, so never say it is "
-            "scheduled until you are told it was approved. Write captions in the account's voice. Accounts (a draft "
+            "scheduled until you are told it was approved. The voice you speak in is the user's pick: if they want "
+            "another, they choose it under the message box, where they can hear each one first. Write captions in "
+            "the account's voice. Accounts (a draft "
             "goes to the one on its platform):\n"
             + ("\n".join(accounts) or "- none: the user has to add an Instagram or X account in FlowAI first")
             + self._campaign_prompt()

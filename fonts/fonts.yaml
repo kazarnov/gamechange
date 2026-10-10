@@ -1,0 +1,50 @@
+# The fonts texts on posts can use, grouped by style. The assistant sees each font's name and what
+# it suits, so it can pick one for the brand and the mood ("more elegant", "like a sale poster");
+# the page shows them by style in the text editor, each previewed in the text's own words.
+#
+# Per font: its file here, the name shown, its style, what it suits, and scale: it's drawn this much
+# bigger or smaller, so every font looks about the same size at the same setting (thin scripts need
+# more). Any other .ttf/.otf dropped in this folder can still be used by its file name.
+# Licences: OFL-*.txt (SIL Open Font License) and LICENSE-*.txt (Apache 2.0) next to the files.
+# All but Geist and Instrument Serif come from Google Fonts.
+
+styles:
+  modern: Modern
+  poster: Poster
+  elegant: Elegant
+  handwritten: Handwritten
+  playful: Playful
+  retro: Retro
+  mono: Mono
+
+fonts:
+  bold: {file: Geist-ExtraBold.ttf, label: Geist Bold, style: modern, suits: "clean and strong; the default"}
+  semibold: {file: Geist-SemiBold.ttf, label: Geist Semi, style: modern, suits: "calm and clean, for longer lines"}
+  montserrat: {file: Montserrat-ExtraBold.ttf, label: Montserrat, style: modern, suits: "geometric and confident: brands, launches"}
+  poppins: {file: Poppins-SemiBold.ttf, label: Poppins, style: modern, suits: "round and friendly: apps, services, lifestyle"}
+  syne: {file: Syne-Bold.ttf, label: Syne, style: modern, suits: "wide and artsy: studios, design, events"}
+
+  anton: {file: Anton-Regular.ttf, label: Anton, style: poster, scale: 0.95, suits: "tall and condensed: loud sale headlines, sport"}
+  bebas: {file: BebasNeue-Regular.ttf, label: Bebas Neue, style: poster, scale: 1.05, suits: "capitals only, condensed: short punchy words, fitness, streetwear"}
+  archivo: {file: ArchivoBlack-Regular.ttf, label: Archivo Black, style: poster, suits: "heavy and wide: statements, big numbers"}
+
+  serif: {file: InstrumentSerif-Italic.ttf, label: Instrument Serif, style: elegant, suits: "light italic: quotes, fashion"}
+  playfair: {file: PlayfairDisplay-Bold.ttf, label: Playfair Display, style: elegant, suits: "high-contrast serif: luxury, beauty, editorial"}
+  dm-serif: {file: DMSerifDisplay-Regular.ttf, label: DM Serif, style: elegant, scale: 1.05, suits: "editorial headlines: magazines, real estate"}
+  cormorant: {file: CormorantGaramond-SemiBold.ttf, label: Cormorant, style: elegant, scale: 1.2, suits: "delicate classic: jewellery, perfume, weddings"}
+  fraunces: {file: Fraunces-SemiBold.ttf, label: Fraunces, style: elegant, suits: "soft and warm: cafés, bakeries, food"}
+
+  caveat: {file: Caveat-Bold.ttf, label: Caveat, style: handwritten, scale: 1.15, suits: "casual handwriting: notes, personal, behind the scenes"}
+  pacifico: {file: Pacifico-Regular.ttf, label: Pacifico, style: handwritten, scale: 0.95, suits: "retro brush script: summer, surf, ice cream"}
+  dancing: {file: DancingScript-Bold.ttf, label: Dancing Script, style: handwritten, scale: 1.15, suits: "flowing script: florists, cosmetics, invitations"}
+  great-vibes: {file: GreatVibes-Regular.ttf, label: Great Vibes, style: handwritten, scale: 1.25, suits: "formal calligraphy: weddings, luxury; best big and short"}
+
+  fredoka: {file: Fredoka-SemiBold.ttf, label: Fredoka, style: playful, suits: "rounded and friendly: kids, toys, pets"}
+  lilita: {file: LilitaOne-Regular.ttf, label: Lilita One, style: playful, suits: "chunky and fun: snacks, games, promos"}
+
+  righteous: {file: Righteous-Regular.ttf, label: Righteous, style: retro, suits: "rounded 70s: music, events, vintage"}
+  abril: {file: AbrilFatface-Regular.ttf, label: Abril Fatface, style: retro, suits: "fat 70s serif: posters, vintage fashion"}
+  typewriter: {file: SpecialElite-Regular.ttf, label: Special Elite, style: retro, suits: "typewriter: stories, craft, coffee"}
+
+  mono: {file: GeistMono-Medium.ttf, label: Geist Mono, style: mono, suits: "technical: prices, specs"}
+  space-mono: {file: SpaceMono-Bold.ttf, label: Space Mono, style: mono, suits: "bold and techy: tech, gaming"}

@@ -20,7 +20,8 @@ from datetime import datetime
 
 from .config import ROOT, settings
 from .skills import load_skills
-from .studio import POSITIONS, SIZES, STYLES
+from .reel import MOODS, MOTIONS
+from .studio import EDIT_MODES, POSITIONS, SIZES, STYLES
 
 log = logging.getLogger(__name__)
 
@@ -120,7 +121,7 @@ async def cancel_browser_task(session):
 # --- Images and video (ComfyUI on the RunPod pod) --------------------------------
 
 MEDIA_TOOLS = {"generate_media", "media_status", "cancel_media", "list_media_workflows",
-               "search_workflow_templates", "add_media_workflow"}
+               "search_workflow_templates", "add_media_workflow", "edit_area"}
 
 
 @tool(
@@ -225,7 +226,8 @@ _LOOK = {
     "style": {"type": "string", "enum": STYLES, "description": "shadow (default), outline, box (a panel behind "
                                                               "the text, best on busy pictures) or plain"},
     "box_color": {"type": "string", "description": "Colour of the panel (style box) or outline (default black)"},
-    "font": {"type": "string", "description": "bold (default), semibold, serif, mono, or an installed font's name"},
+    "font": {"type": "string", "description": "A font's name from the fonts by style in your instructions, e.g. "
+                                              "playfair or caveat (default bold)"},
 }
 _POST = {
     "placement": {"type": "string", "description": "Instagram: feed (default), story or reel. X: post"},
@@ -240,7 +242,7 @@ _POST = {
 }
 
 STUDIO_TOOLS = {"create_draft", "update_draft", "add_text", "edit_text", "remove_text", "undo_draft",
-                "show_draft", "load_skill"}
+                "show_draft", "load_skill", "make_video"}
 
 
 @tool(
@@ -363,6 +365,69 @@ async def remove_text(text_id: int, session, draft: int | None = None):
 )
 async def undo_draft(session, draft: int | None = None):
     return await session.studio.undo(draft)
+
+
+@tool(
+    "edit_area",
+    "Change only the area of a slide's picture that the user painted over on screen; the rest of the picture "
+    "stays exactly as it is. Use it whenever an area is painted and the user says what to do with it.",
+    {
+        "type": "object",
+        "properties": {
+            "mode": {"type": "string", "enum": list(EDIT_MODES),
+                     "description": "remove: take it away and show what's behind. replace: put something else there "
+                                    "(say what in prompt). change: alter what is there, e.g. its colour or material. "
+                                    "improve: sharper, better lit, more realistic"},
+            "prompt": {"type": "string", "description": "In English. replace: what goes there, e.g. 'a small cactus "
+                                                        "in a terracotta pot'. change: the instruction, e.g. 'Make the "
+                                                        "dress dark blue'. improve: optional, what to improve"},
+            "draft": {"type": "integer", "description": "Default: the draft with the painted area"},
+            "slide": {"type": "integer", "description": "Default: the painted slide"},
+        },
+        "required": ["mode"],
+    },
+)
+async def edit_area(mode: str, session, prompt: str = "", draft: int | None = None, slide: int | None = None):
+    return await session.studio.edit_area(draft, slide, mode, prompt)
+
+
+@tool(
+    "make_video",
+    "Make a draft's pictures (one or several) into a short video: your voice reads a line per picture in the "
+    "user's voice while each picture slowly zooms or pans, with captions, music and an end card with a call to "
+    "action. It goes into a draft of its own (an Instagram reel or an X post), made in the background; asked "
+    "again, of either draft, that same video is made again with the changes.",
+    {
+        "type": "object",
+        "properties": {
+            "draft": {"type": "integer", "description": "The draft with the pictures, or the video's own draft to "
+                                                        "make it again (default: the latest)"},
+            "lines": {"type": "array", "items": {"type": "string"},
+                      "description": "What the voice says over each picture: exactly one entry per picture, in "
+                                     "order (a one-picture post has one entry). An entry can be one to three short "
+                                     "spoken sentences; each sentence gets its own camera move. Hook first, no "
+                                     "hashtags or emoji, and no call to action (that's cta_line). Leave out to keep "
+                                     "the last video's lines"},
+            "cta": {"type": "string", "description": "Words on the end card's button, 1 to 3 words, e.g. 'Shop now', "
+                                                     "'Order yours', 'Book a table'; empty for no end card"},
+            "cta_line": {"type": "string", "description": "The call to action the voice says on the end card, e.g. "
+                                                          "'Order yours today, the link is in our bio.'"},
+            "music": {"type": "string", "enum": [*MOODS, "none"],
+                      "description": "Background music: " + ", ".join(f"{k} ({v})" for k, v in MOODS.items())},
+            "captions": {"type": "boolean", "description": "Show the spoken words (default true)"},
+            "motion": {"type": "string", "enum": ["auto", "pan", *MOTIONS],
+                       "description": "How the pictures move (default auto: a different move for each; pan: "
+                                      "side to side, one way then the other)"},
+            "placement": {"type": "string", "description": "Instagram: reel (default), story or feed. X: post"},
+            "color": {"type": "string", "description": "The end card button's colour (default: the post's own)"},
+        },
+    },
+)
+async def make_video(session, draft: int | None = None, lines: list | None = None, cta: str | None = None,
+                     cta_line: str | None = None, music: str | None = None, captions: bool | None = None,
+                     motion: str | None = None, placement: str | None = None, color: str | None = None):
+    return await session.make_video(draft, lines=lines, cta=cta, cta_line=cta_line, music=music, captions=captions,
+                                    motion=motion, placement=placement, color=color)
 
 
 @tool(

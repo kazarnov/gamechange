@@ -24,6 +24,9 @@ Wire protocol
             {"type": "focus", "draft": 1, "slide": 1, "text": 2}
                                                what the user selected on screen ("this", "it");
                                                {"type": "focus"} clears it
+            {"type": "mask", "draft": 1, "slide": 1, "data": "data:image/png;base64,..."}
+                                               the area the user painted over on a slide (painted
+                                               pixels opaque); without data, none
             {"type": "action", "name": ..., ...}
                                                a button on the page, done without the LLM:
               undo, save {"draft": 1}
@@ -41,9 +44,22 @@ Wire protocol
               schedule {"draft": 1, "when": "2026-10-16T09:00:00Z"}
                                                asks for approval, like schedule_post
               open_campaign {"campaign": 3}    a FlowAI campaign's posts into this conversation
+              edit_area {"draft": 1, "slide": 1, "mode": "remove", "prompt": "..."}
+                                               change only the painted area (mode: change, remove,
+                                               replace, improve)
+              make_video {"draft": 1, "lines": [...], "cta", "cta_line", "music", "captions",
+                          "motion", "placement"}
+                                               the draft's pictures as a video with the voice
             {"type": "approve" | "decline", "id": 3, "conversation": "..."}
                                                the user's answer to an approval (scheduling, a campaign
                                                version); with "done": true the page did it itself
+            {"type": "voices", "q": "british", "lang": "English"}
+                                               the voices to pick from (and catalog voices matching q)
+            {"type": "voice", "id": "..."} | {"type": "voice", "archetype": "..."}
+                                               speak in this voice from now on (a catalog voice is set
+                                               up first); kept for the user
+            {"type": "preview_voice", "id" | "archetype": "..."}
+                                               play how a voice sounds (it stops what is being said)
   server -> client
     binary: 4-byte little-endian turn id + PCM16 mono 24 kHz assistant speech
     json:   ready | vad | transcript | assistant_delta | assistant_done |
@@ -51,8 +67,9 @@ Wire protocol
             browser_task (started/done/failed/cancelled) | browser_step |
             media_job (generate/install: started/running/done/failed/cancelled) |
             media (a generated or attached file, served at media/..., next to the page) |
-            draft (a post draft's new version: its slides as files, where its texts are, caption
-                   and platform check) |
+            draft (a post draft's new version: its slides as files, where its texts are and how
+                   readable, its pictures' colours, caption, platform check, and for a video draft
+                   how it was made; quiet: true when it isn't one to bring on screen) |
             flowai (the signed-in user and their accounts) | posts (the latest FlowAI posts) |
             saved (a draft's FlowAI post: id, saved version, status, link) |
             linked (a draft that is a FlowAI campaign's post: campaign, item, version, status, times) |
@@ -60,7 +77,10 @@ Wire protocol
             conversation (the conversation now on screen, whole: history, media, running jobs,
                           drafts, saved, linked, approvals; the page starts over from it) |
             about (its name or campaign changed) |
-            conversations (the user's conversations, newest first, and which one is on screen)
+            conversations (the user's conversations, newest first, and which one is on screen) |
+            voice (the voice it speaks in: id, name, description, language) |
+            voices (the ones ready to use, catalog voices matching the search, and the current one) |
+            fonts (after ready: the fonts texts can use, by style, each with its file under fonts/)
 
 Conversations are kept (backend/conversations.py): this connection shows one at a time, and a
 conversation outlives the connection, so a reconnect picks it up again.
@@ -74,10 +94,11 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 
+import httpx
 import numpy as np
 from fastapi import WebSocket, WebSocketDisconnect
 
-from . import tools
+from . import reel, tools
 from .asr import ASREngine, StreamingTranscription
 from .browser import Browser
 from .browser_agent import BrowserAgent
@@ -88,7 +109,7 @@ from .flowai import FlowAIClient, FlowAISession
 from .llm import LLM
 from .media import MediaSession
 from .skills import catalogue, load_skills
-from .studio import LOOK, StudioSession
+from .studio import LOOK, StudioSession, fonts_event, fonts_prompt
 from .tts import SAMPLE_RATE as TTS_RATE
 from .tts import SentenceChunker, TTSEngine
 from .vad import TurnDetector
@@ -130,6 +151,7 @@ class VoiceSession:
         # Kept once FlowAI says whose it is; without FlowAI, they're all this machine's
         self.conv = self.store.new(None if settings.flowai_url else "local")
         self.conv.sessions.add(self)
+        self.voice: dict = models.tts.default  # every sentence in this voice (load_voice)
         self.flowai = self.new_flowai()
         self.flowai_loading: asyncio.Task | None = None
         self.switching = asyncio.Lock()  # one conversation change at a time
@@ -217,13 +239,27 @@ class VoiceSession:
             + (", and pictures (one prompt per slide: each is made in the draft's shape and goes in by itself "
                "when ready, so don't wait or check on it; you'll be told). To change what is in a slide's "
                "picture, call generate_media with draft and slide and an editing workflow; its prompt says only "
-               "what to change, e.g. 'Remove the plant in the background, keep everything else the same'"
+               "what to change, e.g. 'Remove the plant in the background, keep everything else the same'. The "
+               "user can also paint over part of a slide's picture on screen (you're told when they do): then "
+               "call edit_area to remove, replace, change or improve only that part, and the rest of the picture "
+               "stays exactly as it is"
                if self.m.comfy else
                ". Pictures come from files the user attaches"
                + (" or from the FlowAI gallery (use_assets)" if self.flowai else "")
                + ", since making new ones is off")
             + ". Words on a picture always go through texts or add_text, never through the image model. Change "
             "the caption with update_draft and texts with edit_text or remove_text; to go back, use undo_draft. "
+            "Fonts, by style: pick ones that fit the brand and the post's mood (an elegant serif for luxury, "
+            "handwriting for something personal, a condensed poster font for a sale), at most two per post, "
+            "e.g. a display headline with a plain modern line under it:\n" + fonts_prompt(ROOT / settings.fonts_dir)
+            + "\n"
+            "A text the platform check calls hard to read needs a panel (style box) or a colour that stands out "
+            "from its picture; each slide lists its picture's colours, which make texts look part of the post. "
+            "make_video turns a draft, with one picture or several, into a short video: your voice reads a line "
+            "per picture in the user's chosen voice while the pictures slowly zoom and pan, with captions, music "
+            "and an end card with a call to action ('Order now'). Write the lines like a short spoken ad: a hook, "
+            "one idea per picture, then the call to action in cta_line. It is made in the background into its "
+            "own draft; asking again (other words, music, button) makes that same video again. "
             "Make independent changes together in one step. Change only what the user named (the headline is one "
             "text) and keep everything else. Never leave a placeholder such as [date] or [link] in a caption or "
             "text: write the real words (\"this Friday\") or ask. The user sees every new version, so say in a few "
@@ -273,6 +309,7 @@ class VoiceSession:
 
     async def run(self):
         await self.send(type="ready", tts_sample_rate=TTS_RATE, asr_mode=settings.asr_mode)
+        await self.send(**fonts_event(ROOT / settings.fonts_dir))
         try:
             while True:
                 msg = await self.ws.receive()
@@ -312,8 +349,12 @@ class VoiceSession:
                         await self.flowai.use_token(str(msg["token"]))
                     self.load_flowai()
                 self.spawn(self.on_conversation({"type": "hello", "id": msg.get("conversation")}))
+                self.spawn(self.load_voice())
             case "focus":
                 self.conv.focus = {k: msg[k] for k in ("draft", "slide", "text") if msg.get(k) not in (None, "")}
+            case "mask":
+                if problem := self.studio.set_mask(msg.get("draft"), msg.get("slide"), msg.get("data")):
+                    await self.send(type="error", message=problem[:1].upper() + problem[1:] + ".")
             case "action" | "approve" | "decline":
                 # Uploads to FlowAI take a moment: keep reading mic audio meanwhile
                 self.spawn(self.on_action(msg), self.actions)
@@ -323,6 +364,12 @@ class VoiceSession:
                 self.spawn(self.on_conversation(msg))
             case "reset":
                 self.spawn(self.on_conversation({"type": "new"}))
+            case "voices":
+                self.spawn(self.send_voices(str(msg.get("q") or ""), str(msg.get("lang") or "")))
+            case "voice":
+                self.spawn(self.set_voice(msg))
+            case "preview_voice":
+                self.spawn(self.preview_voice(msg))
 
     async def on_upload(self, msg: dict):
         try:
@@ -389,6 +436,18 @@ class VoiceSession:
         elif name == "schedule" and self.flowai:
             result = await self.flowai.schedule(draft, msg.get("when"))
             done = f"asked to schedule a draft from the calendar: {result.get('asks')}"
+        elif name == "edit_area":
+            result = await self.studio.edit_area(draft, msg.get("slide"), msg.get("mode") or "change",
+                                                 msg.get("prompt") or "")
+            done = f"painted over an area of slide {result.get('slide')} of draft {result.get('draft')} " \
+                   f"({result.get('area')}) and asked to {msg.get('mode') or 'change'} it" + \
+                   (f": “{msg['prompt']}”" if msg.get("prompt") else "") + \
+                   "; it is being edited and goes on the slide by itself"
+        elif name == "make_video":
+            result = await self.make_video(draft, **{k: msg[k] for k in ("lines", "cta", "cta_line", "music", "captions",
+                                                                      "motion", "placement", "color") if k in msg})
+            done = f"asked for a video of draft {result.get('source')} with these lines: " \
+                   f"{json.dumps(msg.get('lines'), ensure_ascii=False)}; it is being made into {result.get('into')}"
         elif name == "open_campaign" and self.flowai:
             if self.flowai_loading:
                 await self.flowai_loading  # its accounts say which platform each post is for
@@ -446,6 +505,7 @@ class VoiceSession:
         if self.actions:
             await asyncio.wait(set(self.actions))  # a save in flight finishes in the conversation it began in
         old, self.conv = self.conv, conv
+        old.studio.set_mask()  # the page stops painting when it shows another conversation
         conv.sessions.add(self)
         conv.focus, conv.focus_told = {}, {}  # the page starts with nothing selected
         conv.announce = False  # what happened meanwhile is on screen: no need to say it right away
@@ -477,11 +537,105 @@ class VoiceSession:
         items = await self.store.list(owner) if owner else []
         await self.try_send(type="conversations", items=items, current=self.conv.id, kept=bool(owner))
 
+    # --- voice ----------------------------------------------------------------------
+    # Every sentence is spoken in one voice: the user's pick, kept with their conversations
+    # (prefs.json), so it's the same in all of them and after a reload; until they pick, TTS_VOICE.
+
+    async def load_voice(self):
+        if self.flowai_loading:
+            await self.flowai_loading  # whose pick to read (it never raises)
+        saved = (await self.store.prefs(self.owner)).get("voice") if self.owner else None
+        if saved:
+            try:
+                self.voice = await asyncio.to_thread(self.find_voice, saved)
+            except Exception as exc:
+                log.warning("voice %s couldn't be checked: %s", saved.get("id"), exc)
+                self.voice = saved  # the voice server is down: nothing is spoken anyway
+        await self.try_send(type="voice", **self.voice)
+
+    def find_voice(self, saved: dict) -> dict:
+        """The saved pick if the server still has it; made again if it came from the catalog (a new
+        pod starts with only its demo voice), the same voice as before; else the default."""
+        tts = self.m.tts
+        for v in tts.profiles():
+            if v["id"] == saved.get("id"):
+                return v
+        return tts.adopt(saved["archetype"]) if saved.get("archetype") else tts.default
+
+    async def set_voice(self, msg: dict):
+        tts = self.m.tts
+        try:
+            if msg.get("archetype"):
+                voice = await asyncio.to_thread(tts.adopt, str(msg["archetype"]))
+            else:
+                voice = next((v for v in await asyncio.to_thread(tts.profiles) if v["id"] == msg.get("id")), None)
+        except Exception as exc:
+            log.warning("voice %s couldn't be set up: %s", msg.get("archetype") or msg.get("id"), exc)
+            voice = None
+        if not voice:
+            await self.try_send(type="error", message="That voice couldn't be set up. Try another one.")
+            return await self.try_send(type="voice", **self.voice)
+        self.voice = voice
+        log.info("voice: %s (%s)", voice["name"], voice["id"])
+        if self.owner:
+            await self.store.set_prefs(self.owner, voice=voice)
+        await self.try_send(type="voice", **voice)
+
+    async def send_voices(self, q: str, lang: str):
+        tts = self.m.tts
+        try:
+            ready = await asyncio.to_thread(tts.profiles)
+            # A catalog voice already set up is among the ready ones
+            catalog, total, languages = await asyncio.to_thread(
+                tts.catalog, q, lang, {v["archetype"] for v in ready if v["archetype"]})
+        except Exception as exc:
+            log.warning("voices couldn't be listed: %s", exc)
+            return await self.try_send(type="error", message="The voice server didn't answer. Try again in a moment.")
+        await self.try_send(type="voices", q=q, lang=lang, current=self.voice["id"], choosable=tts.choosable,
+                            ready=ready, catalog=catalog, total=total, languages=languages)
+
+    async def preview_voice(self, msg: dict):
+        """How a voice sounds, played like speech: it cuts off whatever was being said."""
+        try:
+            audio = await asyncio.to_thread(self.m.tts.sample, msg.get("id") or None, msg.get("archetype") or None)
+        except Exception as exc:
+            log.warning("voice %s couldn't be played: %s", msg.get("archetype") or msg.get("id"), exc)
+            return await self.try_send(type="error", message="That voice can't be played right now.")
+        await self.interrupt()
+        await self.send_audio(self.turn, audio)
+        self.speaking_until = time.monotonic() + len(audio) / TTS_RATE
+
+    async def make_video(self, draft=None, **asked) -> dict:
+        """make_video in the voice the user picked, with FlowAI Sound's music if it's there."""
+        tts, voice = self.m.tts, self.voice["id"]
+
+        def compose(mood: str, seconds: float) -> bytes | None:  # in the render's thread
+            try:
+                r = httpx.post(f"{settings.sound_url.rstrip('/')}/v1/music", timeout=120,
+                               json={"mood": mood, "seconds": round(min(max(seconds, 5), 180), 1)})
+                r.raise_for_status()
+                return reel.music_wav(r.json()["audio"])
+            except Exception as exc:
+                log.warning("no music for the video: %s", exc)
+                return None
+
+        return await self.studio.make_video(draft, **asked, speak=lambda text: tts.synthesize(text, voice),
+                                            compose=compose if settings.sound_url else None, moods=tuple(reel.MOODS))
+
     def focus_note(self) -> str | None:
-        """What the user selected on screen, for "this" and "it", when it changed since the LLM was told."""
+        """What the user selected or painted on screen, for "this" and "it", when it changed since the LLM
+        was told."""
+        conv, notes = self.conv, []
+        if self.studio.mask_seq != conv.mask_told:
+            conv.mask_told = self.studio.mask_seq
+            if note := self.studio.mask_note():
+                notes.append(note)
+        if conv.focus != conv.focus_told and (note := self.selection_note()):
+            notes.append(note)
+        return " ".join(notes) or None
+
+    def selection_note(self) -> str | None:
         conv = self.conv
-        if conv.focus == conv.focus_told:
-            return None
         conv.focus_told = dict(conv.focus)
         d = self.studio.drafts.get(conv.focus.get("draft"))
         if not d:
@@ -669,7 +823,7 @@ class VoiceSession:
     async def speak(self, sentences: asyncio.Queue, turn: int):
         while (text := await sentences.get()) is not None:
             t0 = time.perf_counter()
-            audio = await asyncio.to_thread(self.m.tts.synthesize, text)
+            audio = await asyncio.to_thread(self.m.tts.synthesize, text, self.voice["id"])
             dur = len(audio) / TTS_RATE
             log.info("TTS %.0f ms for %.1f s audio: %r", (time.perf_counter() - t0) * 1000, dur, text)
             if turn != self.turn:

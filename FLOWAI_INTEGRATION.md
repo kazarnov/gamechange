@@ -127,7 +127,18 @@ Beyond the plan below:
   order, removing and adding slides (new `action` messages in `backend/session.py`);
 - the gallery inside the page;
 - FlowAI's week grid (`WeekGrid`, now exported from `pages/Calendar.tsx`), with drafts dropped on
-  a slot to book them.
+  a slot to book them;
+- the voice it speaks in, picked under the message box (`Voices.tsx`) and kept per user by the
+  agent (README, "Voice");
+- fonts by style (modern, poster, elegant, handwritten, playful, retro, mono), each previewed in
+  the text's words from the file the agent draws with (`Fonts.tsx`; README, "Fonts");
+- text colours from the slide's own picture next to a curated set, each marked when it would be
+  hard to read where the text sits, with one-click looks that read well there (`Palette.tsx`);
+- painting over part of a slide's picture to remove, replace, change or improve just that part
+  (`Retouch.tsx`: the brush, and a new `mask` message; README, "Changing part of a picture");
+- a draft's pictures made into a video with the assistant's voice, motion, captions, music and an
+  end card (`VideoMaker.tsx`; README, "Videos with the voice"). The `assistant` service gets
+  `SOUND_URL: http://sound:8000` in `docker-compose.yml` for the music.
 
 **What.** A page at `/dashboard/assistant`, ported from this repo's working page:
 
@@ -458,6 +469,33 @@ VoiceStudio):
 
 The test conversations, the test post, the uploaded slide and the test token were deleted
 afterwards. The demo user keeps a sample campaign, recreated as new, for trying this out.
+
+Run on 2026-10-10, after the voice picker (same stack). Before it, `TTS_VOICE=alloy` sent every
+sentence to VoiceStudio's default voice, which OmniVoice makes up anew for each request:
+
+| What | Result |
+|---|---|
+| Same speaker from one sentence to the next (WavLM speaker embeddings, cosine; about 0.86 and up is the same person; six sentences each) | `alloy`: lowest pair 0.38, mean 0.65, so different people. The demo profile: 0.89 / 0.92. Catalog voices made into profiles: each sentence against the voice's own recording scored 0.87 to 0.99, apart from the one-word "Sure.", too short to judge. A fixed `seed` changed nothing, so none is sent. |
+| Over the WebSocket | `hello` gives the voice (the demo profile, not `alloy`). `voices` lists the ready ones, 51 featured catalog voices and 11 languages; "british male" finds 27, none of them female, in 0.16 s (the catalog is read once and searched in the agent). A preview plays 7.1 s of sample after 2.3 s and creates no profile. Picking a catalog voice made it a profile in 1.7 s. A new connection speaks in it. With the profile deleted on the server, the next connection made it again. An unknown id is refused and the voice stays. |
+| The tab in a browser | The picker asks once on opening, and typing searches once (debounced). ▶ plays the sample, with a stop button while it does. **Use** puts a catalog voice in use and among the ready ones, and the footer shows it; after a reload it is still the voice. At 390 px, no sideways scroll. No console errors. |
+| Found and fixed | The conversation list sent `conversations` 809 times in 4 s while open: its effect depended on functions recreated on every render. Now it asks once. |
+
+The test voices were deleted from VoiceStudio, and the demo user is back on the default voice.
+
+Run on 2026-10-10, after colours, painted edits and videos (same stack, the pod's FLUX.2 Klein
+edit workflow, VoiceStudio, FlowAI Sound):
+
+| What | Result |
+|---|---|
+| Colours and readability (WebSocket) | A slide of three figurines comes with `#f7e3d0`, `#e6a367`, `#2b241e` (tint, vivid, deep). Gold plain text over the light wall scores 1.3:1 and the check warns. Restyled as the tint on a deep panel: 4.2:1 and the warning goes. |
+| Removing a painted figurine (WebSocket) | 13 to 15 s. Outside the painted area (plus 40 px), 0 pixels changed out of 1080 × 1350. Inside, 56% did. The figurine is gone, the shelf and wall carried on. A first try asking the model to "remove the object in the middle" kept it, or took only the head, so the area is now filled with magenta first. |
+| Spoken: paint, then “remove this” | `edit_area(mode=remove)`, done 16 s after asking; the assistant said where (“from the upper right”). |
+| Spoken: “turn this post into a short reel with a voiceover, some warm music, and end it with an Order now button” | `make_video` with four lines, `cta` Order now, golden-hour music: a 14.8 s Instagram reel draft 27 s after asking. It had put its call to action in `lines`, so the tool's description now asks for it in `cta_line`. |
+| Video (WebSocket) | 1080 × 1920, H.264 + AAC, made in 11 s for 8 s and 12 s for 14 s. It passes the reel check (size and length known). The source draft lists it. Asked again with another button and no music, the same draft gets version 2 with the same lines. Music sits about 7 dB under the voice between lines and lower under it; -15 LUFS overall. |
+| The page in a browser | Swatches from the picture and the classic set. With the text over the light wall, eleven colours are marked as hard to read before they're picked, and one click on a suggested look takes it from 2.5:1 to 13:1. Five brush strokes send five masks; **Remove it** puts the edited picture on the slide; stopping clears the mask. The video form shows progress, the video draft opens on its own, and sound turns on with one click. At 390 px, no sideways scroll. No console errors. Playwright's Chromium has no H.264, so there it checked that the MP4 is served (200, `video/mp4`). |
+| Fonts (WebSocket, then the assistant) | The page gets 24 fonts in 7 styles, and every file is served. “Great Vibes” (a label) sets `great-vibes`. Asked for “more elegant, like a luxury brand”, the assistant picked `playfair`; “a loud sale poster”, `anton`; “handwritten and personal”, `caveat`. |
+| Fonts in a browser | Seven style tabs. The picker opens on the text's own style. Fonts are previewed in the text's words from the agent's files, and Playfair, Caveat and Bebas each redraw the slide when picked. No sideways scroll at 390 px once the “Selected: …” chip above the message box got `w-0`: its truncated text had been widening the page by 18 px whenever a longer text was selected. |
+| Found and fixed | When a video was ready, the page jumped back to the picture draft (its re-sent event, which lists its videos, made it current). That event is now `quiet`. A one-picture video was one long zoom, so each sentence is now its own shot. Blending two framings of the same picture doubled everything mid-fade, so those are straight cuts now. |
 
 Found along the way, not needed for the agent:
 

@@ -3,8 +3,9 @@ page can list them, switch between them and pick one up again later, or after a 
 
 A conversation stays in memory while a connection shows it, or while a picture or video is still
 being made for it (it goes into its draft even if the user has moved on); otherwise only its file
-is kept: DATA_DIR/conversations/<owner>/<id>.json, plus index.json per owner for the list. The
-owner is the FlowAI user it belongs to ("local" when FlowAI is off). When FlowAI can't say who the
+is kept: DATA_DIR/conversations/<owner>/<id>.json, plus index.json per owner for the list, and
+prefs.json for what holds across their conversations (the voice). The owner is the FlowAI user
+it belongs to ("local" when FlowAI is off). When FlowAI can't say who the
 user is, the conversation isn't kept at all, so nobody's conversations end up in a shared folder.
 """
 
@@ -83,6 +84,7 @@ class Conversation:
         self.announce = False  # a note needs a spoken reply even if the user says nothing
         self.focus: dict = {}  # what the user selected on screen
         self.focus_told: dict = {}  # the selection the LLM was last told about
+        self.mask_told = 0  # the painted area the LLM was last told about (StudioSession.mask_seq)
         # Its FlowAI links (backend/flowai.py): draft id -> Saved and -> Linked, approvals by id,
         # and the assets it uploaded (the only ones it may delete)
         self.saved: dict = {}
@@ -321,6 +323,20 @@ class ConversationStore:
         async with self.lock:
             await asyncio.to_thread(self._write, self._dir(owner), cid, None, None)
         await asyncio.to_thread(_remove, [self._dir(owner) / f"{cid}.json", *files])
+
+
+    async def prefs(self, owner: str) -> dict:
+        return await asyncio.to_thread(_read_json, self._dir(owner) / "prefs.json")
+
+    async def set_prefs(self, owner: str, **values):
+        folder = self._dir(owner)
+
+        def write():
+            folder.mkdir(parents=True, exist_ok=True)
+            _write_json(folder / "prefs.json", {**_read_json(folder / "prefs.json"), **values})
+
+        async with self.lock:
+            await asyncio.to_thread(write)
 
 
 def _read_json(path: Path) -> dict:

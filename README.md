@@ -212,6 +212,8 @@ check, plus one of ours: no `[placeholder]` left in), and shown on the page with
 |---|---|
 | "Make an Instagram post for our linen shirt launch" | one `create_draft` with the caption, the texts and a picture prompt; the picture is made in the draft's 4:5 shape and drops in when ready |
 | "Remove the cup on the table" | `generate_media(flux2_klein_edit, draft=1)`: edits that slide's current picture and puts the result back in the draft |
+| (paint over the cup on the slide) "remove this" / "make it gold" / "put a vase there" | `edit_area`: only the painted part changes, the rest of the picture stays exactly as it was (see [Changing part of a picture](#changing-part-of-a-picture)) |
+| "Make it a reel with a voiceover and an Order now button" | `make_video`: the pictures move, your voice reads a line over each, captions, music, an end card (see [Videos with the voice](#videos-with-the-voice)) |
 | "Make the headline yellow and move it to the bottom" / "Drop the second line" | `edit_text` / `remove_text` |
 | (click a text on the page) "make this bigger" | the click tells the assistant which text "this" is |
 | "Shorter caption, fewer hashtags" | `update_draft(caption=...)` |
@@ -221,10 +223,97 @@ check, plus one of ours: no `[placeholder]` left in), and shown on the page with
 
 Text is drawn with Pillow, never by the image model, so it is spelled right and easy to change.
 Texts wrap and shrink to fit. Texts at the same position stack instead of overlapping. On stories
-and reels they keep clear of Instagram's buttons. Fonts are the `.ttf`/`.otf` files in `fonts/`
-(`bold`, `semibold`, `serif` and `mono` are FlowAI's Geist and Instrument Serif; add more by
-dropping files in). Rendered files go to `media/` like everything else. Text on videos isn't
-drawn yet.
+and reels they keep clear of Instagram's buttons. Rendered files go to `media/` like everything
+else. Text on videos isn't drawn yet.
+
+### Fonts
+
+24 fonts in seven styles, listed in `fonts/fonts.yaml`:
+
+| Style | Fonts |
+|---|---|
+| Modern | `bold` (Geist, the default), `semibold`, `montserrat`, `poppins`, `syne` |
+| Poster | `anton`, `bebas`, `archivo` |
+| Elegant | `serif` (Instrument Serif), `playfair`, `dm-serif`, `cormorant`, `fraunces` |
+| Handwritten | `caveat`, `pacifico`, `dancing`, `great-vibes` |
+| Playful | `fredoka`, `lilita` |
+| Retro | `righteous`, `abril`, `typewriter` |
+| Mono | `mono` (Geist Mono), `space-mono` |
+
+- **What each suits:** every font has a line saying what it's for ("high-contrast serif: luxury,
+  beauty, editorial"). The assistant gets the list by style, so "more elegant" or "like a sale
+  poster" picks a font from the right style, at most two per post. A font can also be named by its
+  label ("Playfair Display").
+- **Same size in every font:** each font has a scale, so a size looks about the same in any of
+  them. Thin scripts are drawn bigger, tall condensed fonts a little smaller.
+- **On the page:** the text editor's Font picker has a tab per style. Each font is previewed in the
+  text's own words, from the same file the assistant draws with (served at `/fonts`).
+- **Source and licences:** all but Geist and Instrument Serif come from Google Fonts. The
+  licences sit next to the files: `OFL-*.txt` for the SIL Open Font License, and
+  `LICENSE-SpecialElite.txt` for Apache 2.0.
+- **Adding a font:** drop its `.ttf`/`.otf` in `fonts/` and add a line to `fonts.yaml`. Any file
+  there can also be used by its file name. Changes apply without a restart.
+
+### Colours and readability
+
+Every slide comes with its picture's colours: a pale tint of its main colour, up to three of its
+vivid colours made bright enough to read, and a deep shade for panels (`picture_colours` in
+`studio.py`). The assistant sees them as `picture_colours`, and the page shows them first in the
+text's colour picker, before a curated set (cream, sand, ink, sun, coral, sky, forest, navy...).
+
+Each text also gets a readability score where it sits: a contrast ratio of its colour against the
+darkest and lightest parts of the picture behind it, or against its panel, with credit for an
+outline or a shadow. Under 2.2:1 the draft's check warns ("hard to read on the picture behind")
+and the assistant is told. The page works the score out the same way, so the colour picker marks
+the colours that would be hard to read on that spot before you pick them. It also offers a few
+ready-made looks that read well there (a tint on a deep panel, ink on a pale panel, a vivid colour
+outlined...), one click each.
+
+### Changing part of a picture
+
+On the page, **Paint to change part of it** under a slide puts a brush on the picture. Paint over
+what to change (S/M/L brush, eraser, undo), then pick **Remove**, **Replace** (with what),
+**Change** (how) or **Improve**, or just say it ("remove this", "make it navy blue"). After each
+stroke the page sends the painted area (`{"type": "mask"}`), and the assistant is told where it is
+("the upper left, 9% of the picture"), so "this" means that area.
+
+`edit_area` (`retouch.py`) never sends the whole picture to the editing model, which redraws all
+of it and shifts what it keeps. It cuts out the painted area with some room around it, sends that
+alone (the model also works at a higher resolution there), and pastes the result back through the
+painted area with a soft edge. Outside it, the picture is pixel for pixel what it was. The model
+shifts colours a little, so the difference along the area's edge is measured and carried smoothly
+into it, and the patch meets the old picture without a seam. To remove or replace something, the
+area is filled with flat magenta first, so the model fills in that patch from what is around it.
+Told only to "remove the thing in the middle", FLUX.2 Klein kept the thing, or took half of it, in
+our tests. The result is a new numbered picture that replaces the slide's own, so Undo goes back.
+Results vary from run to run: if a removal leaves a smudge, run it again or paint a little wider.
+
+### Videos with the voice
+
+`make_video` (`reel.py`) turns a draft's pictures, one or several, into a short video:
+
+- **Voice:** the assistant writes a line per picture and reads it in the user's chosen voice (the
+  TTS, VoiceStudio or local). A line of several sentences is a shot per sentence.
+- **Motion:** each shot moves the whole time it's on screen (a slow zoom in or out, or a pan), so a
+  still looks filmed. A new picture fades in over the last one. The same picture again comes in
+  with a straight cut and a new framing, like an edit.
+- **On screen:** the slide's texts fade in over it, and captions show the spoken words in the
+  lower third (or above the texts, if they're there).
+- **End card:** optionally, the call to action on a button in the post's colour that pops in
+  ("Order now"), over the last picture blurred, with the voice saying it ("Order yours today, the
+  link is in our bio").
+- **Music:** one of FlowAI Sound's six moods (`SOUND_URL`): Golden hour unless asked otherwise, or
+  none. It steps aside whenever the voice speaks (sidechain compression), and the mix is levelled to
+  -14 LUFS for social video.
+
+Frames are drawn with Pillow and encoded by ffmpeg (`imageio-ffmpeg` brings a static build) as
+H.264 + AAC at the placement's size (1080 × 1920 for a reel). A 15-second video takes about
+15 seconds. It's made in the background into a draft of its own (an Instagram reel by default,
+story or feed on request; an X post for X), which passes the platform check (size and length are
+known). Asked again, of either draft ("other music", "say it shorter", "the button says Shop
+now"), that same video draft is made again with the changes, and Undo goes back to the previous
+video. On the page, the draft's **Video with voice** section does the same by hand: a line per
+picture, the end card, music, motion, captions and format, with a progress bar while it's made.
 
 ### Content skills
 
@@ -307,6 +396,25 @@ the person's approval, and approving it updates the times already booked for tha
 A version that is approved can get another time with `schedule_post`, also approved on screen.
 The assistant's token can't approve anything itself.
 
+### Voice
+
+Every sentence is spoken in the same voice. OmniVoice makes up a new voice for each request
+unless it is given a recording to clone, so the agent always passes one:
+- **Locally**, the voice designed once from `TTS_VOICE_INSTRUCT` (or `TTS_REF_AUDIO`), which is
+  the only one.
+- **With VoiceStudio**, a voice profile on the server. The user picks one on the page: the
+  profiles ready to use (a fresh pod has its demo voice), or one of the server's 1,126 catalog
+  voices, described by gender, age, pitch and accent and searched by those words. A catalog voice
+  becomes a profile the first time it is picked (about 3 s), and picking it again gives the same
+  profile.
+
+The pick is kept per user in `prefs.json`, next to their conversations, so it's the voice in all
+of them and after a reload. If the pod is replaced and the profile is gone, the agent sets the
+catalog voice up again on the next connection, and it sounds the same, because VoiceStudio
+renders catalog voices with a fixed seed. Until the user picks, it's `TTS_VOICE`. The messages
+are `voices` (what to pick from, with a search), `voice` (pick one) and `preview_voice` (play
+its sample, which stops what is being said).
+
 ### Inside FlowAI
 
 FlowAI (`content-generator/`) has a copy of this repo in `assistant/`. It runs as its `assistant`
@@ -363,23 +471,25 @@ backend/
   asr.py       Nemotron 3.5 ASR (streaming + offline fallback)
   llm.py       Ollama cloud client
   tts.py       OmniVoice + sentence chunker
-  voicestudio.py  speech from a VoiceStudio server instead (TTS_URL)
+  voicestudio.py  speech from a VoiceStudio server instead (TTS_URL), its voices and catalog
   tools.py     tool registry (incl. browser_task / status / cancel)
   browser.py   shared Playwright browser + text view of the page
   browser_agent.py  the browser agent's LLM loop and tools
   skills.py    loads skills/*.md
   comfyui.py   client for the ComfyUI manager API on the pod
   media.py     per-conversation generation jobs, numbered media, uploads, adding workflows
-  studio.py    post drafts: slides, texts drawn with Pillow, versions and undo
+  studio.py    post drafts: slides, texts drawn with Pillow, colours and readability, versions and undo
+  retouch.py   changing only the painted part of a picture (cut out, edited, pasted back seamlessly)
+  reel.py      a draft's pictures as a video: motion, the voice, captions, end card, music, ffmpeg
   platforms.py Instagram and X specs and the pre-export check (mirrors FlowAI's)
   flowai.py    FlowAI: accounts and voice, saving, finding, opening and scheduling posts, campaigns
   conversations.py  conversations kept on disk: list, reopen, switch, delete
 skills/        browser agent skills (markdown)
   content/     content skills: how to make each kind of post
-fonts/         fonts for text on pictures (Geist and Instrument Serif, OFL)
+fonts/         fonts for text on pictures, by style (fonts.yaml), with their licences
 comfyui/       RunPod kit (manager.py, setup scripts, workflow bundles) + descriptions.yaml
 media/         generated and attached files (served at media/, next to the page)
-data/          conversations (not served)
+data/          conversations and each user's voice (not served)
 web/           the agent page (index.html, agent.js), the test console (console.html, app.js),
                the protocol client both use (voice.js), mic-worklet.js
 ```
@@ -424,11 +534,16 @@ web/           the agent page (index.html, agent.js), the test console (console.
 - `TTS_URL`, `TTS_API_KEY`, `TTS_VOICE`: speech from a VoiceStudio server (the same OmniVoice model, e.g. on a RunPod
   GPU) instead of this PC. On an L40, a 5.8-second sentence came back in about 0.4 s, against about 4 s with
   OmniVoice on a GTX 1660 Ti. The first request after VoiceStudio starts loads the model (about a minute); the agent
-  makes it at startup. `TTS_VOICE` is a VoiceStudio voice profile's name or id, or an OpenAI voice name (`alloy`,
-  the default, is the server's default voice).
+  makes it at startup. `TTS_VOICE` is the voice until the user picks one on the page (see [Voice](#voice)): a
+  VoiceStudio profile's name or id, or a catalog voice's id such as `feat_04_the_neighbor`; empty means the
+  server's oldest profile. Don't use an OpenAI name like `alloy`: VoiceStudio maps those to OmniVoice's default,
+  which is a new random voice for every request, so the voice changed from one sentence to the next (measured:
+  233, 121, 123 and 110 Hz median pitch over four sentences, against 197, 198, 200 and 179 Hz with a profile).
 - `BROWSER_LLM_MODEL`: a different (e.g. bigger) model for the browser agent; each step is
   one LLM call, about 1 s with `glm-5.3-flash`.
 - `BROWSER_MAX_STEPS`: the agent gives up after this many steps.
 - `COMFYUI_TIMEOUT_MINUTES`: how long to wait for one generation (a video queued behind others can take a while).
+- `SOUND_URL`: FlowAI Sound (e.g. `http://sound:8000`, set in FlowAI's compose) for music under the videos
+  `make_video` makes. Empty: the videos have only the voice.
 - `LLM_MAX_TOOL_ROUNDS`: tool-calling rounds per reply (default 12). A post or a carousel takes one; the rest is
   room for longer chains (find a post, open it, change it, save it).

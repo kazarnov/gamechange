@@ -50,7 +50,9 @@ class Settings(BaseSettings):
     # https://<pod-id>-8002.proxy.runpod.net. Empty = OmniVoice here, with the settings above
     tts_url: str = ""
     tts_api_key: str = ""
-    tts_voice: str = "alloy"  # a VoiceStudio voice profile's name or id, or an OpenAI voice name
+    # Until the user picks one: a VoiceStudio profile's name or id, or a catalog voice's id; empty = the
+    # server's oldest profile. OpenAI names (alloy…) get a new random voice every sentence there
+    tts_voice: str = ""
 
     # Browser agent (Playwright)
     browser_enabled: bool = True
@@ -74,6 +76,9 @@ class Settings(BaseSettings):
     # Content studio: post drafts for Instagram and X (backend/studio.py)
     content_skills_dir: str = "skills/content"  # how to make each kind of post
     fonts_dir: str = "fonts"  # .ttf/.otf files for text on pictures; a file's name is its font name
+    # Music under videos made with make_video (backend/reel.py): FlowAI Sound's composer, e.g.
+    # http://sound:8000 next to FlowAI; empty = videos have only the voice
+    sound_url: str = ""
 
     # FlowAI (content-generator/): where drafts are saved as posts and scheduled (backend/flowai.py)
     flowai_url: str = ""  # its API, e.g. http://localhost:8002; empty = off
