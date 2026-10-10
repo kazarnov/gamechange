@@ -472,10 +472,15 @@ class StudioSession:
     # --- a video with the assistant's voice (reel.py) -----------------------------------
 
     async def make_video(self, ref=None, lines=None, cta=None, cta_line=None, music=None, captions=None,
-                         motion=None, placement=None, color=None, *, speak, compose=None, moods=()) -> dict:
-        """The draft's pictures as a video, its lines read in the user's voice. It goes into a draft of its
+                         motion=None, placement=None, color=None, voice=None, speed=None, sound=None, *,
+                         speak, ready_voice, default_voice, compose=None, moods=()) -> dict:
+        """The draft's pictures as a video, its lines read in the video's voice. It goes into a draft of its
         own; asked again (of either draft), that same video draft is made again with the changes.
-        speak(text) -> 24 kHz audio; compose(mood, seconds) -> WAV bytes or None (FlowAI Sound)."""
+        voice: the voice asked for now (a dict: id, name, description…); else the last video's, else
+        default_voice, the user's. speak(text, voice id, speed) -> 24 kHz audio, in the render's thread;
+        await ready_voice(voice) -> that voice set up on the voice server (a recorded or catalog voice is
+        made again if it lost it; ValueError if it can't be); compose(mood, seconds) -> WAV bytes or None
+        (FlowAI Sound)."""
         try:
             d = self.get(ref)
             if d.video:  # the video draft itself: made again from its pictures' draft
@@ -488,8 +493,22 @@ class StudioSession:
                                if x.video and x.video.get("from") == d.id), None)
             recipe = self._recipe(source, dict(target.video) if target else {}, lines, cta, cta_line, music,
                                   captions, motion, placement, color, moods, compose is not None)
-        except StudioError as exc:
-            return {"error": str(exc)}
+            recipe["voice"] = voice or recipe.get("voice") or default_voice
+            if speed not in (None, ""):
+                recipe["speed"] = round(min(max(float(speed), 0.75), 1.35), 2)
+            recipe.setdefault("speed", 1.0)
+            if sound not in (None, ""):
+                if str(sound).strip().lower() not in reel.VOICE_SOUNDS:
+                    raise StudioError(f"the voice's sound is one of {', '.join(reel.VOICE_SOUNDS)}")
+                recipe["sound"] = str(sound).strip().lower()
+            recipe.setdefault("sound", "natural")
+        except (StudioError, ValueError) as exc:
+            return {"error": str(exc) if isinstance(exc, StudioError) else "speed is a number, e.g. 1.1"}
+        try:
+            recipe["voice"] = await ready_voice(recipe["voice"])
+        except ValueError as exc:
+            return {"error": f"the voice {recipe['voice'].get('name')} can't read it: {exc}"}
+        voice_id, pace = recipe["voice"]["id"], recipe["speed"]
 
         platform, where = source.platform, recipe["placement"]
         spec = platforms.spec(platform, where)
@@ -512,11 +531,12 @@ class StudioSession:
                     n = len(shots)
                     kind = {"auto": reel.AUTO_MOTIONS[n % len(reel.AUTO_MOTIONS)],
                             "pan": ("pan-right", "pan-left")[n % 2]}.get(recipe["motion"], recipe["motion"])
-                    shots.append(reel.Shot(picture, overlay, part, speak(part) if part else None, kind, enter=k == 0))
+                    shots.append(reel.Shot(picture, overlay, part, speak(part, voice_id, pace) if part else None, kind,
+                                           enter=k == 0))
                 progress(0.12 * (i + 1) / len(slides))
             if recipe["cta"]:
                 said = recipe["cta_line"] or recipe["cta"]
-                shots.append(reel.Shot(None, line=said, voice=speak(said), card=recipe["cta"]))
+                shots.append(reel.Shot(None, line=said, voice=speak(said, voice_id, pace), card=recipe["cta"]))
             seconds = reel.length(shots)
             most = spec.get("duration", (0, 600))[1]
             if seconds > most:
@@ -524,7 +544,7 @@ class StudioSession:
                                   f"takes up to {most:g}; shorter lines would fit")
             tune = compose(recipe["music"], seconds + 1) if recipe["music"] and compose else None
             look = reel.Look(size, fonts["bold"].path if "bold" in fonts else None, background, recipe["captions"],
-                             accent, safe)
+                             accent, safe, recipe["sound"])
             data, meta = reel.render(shots, look, tune, lambda share: progress(0.15 + 0.85 * share))
             return data, f"video-draft{source.id}.mp4", meta
 
@@ -535,7 +555,10 @@ class StudioSession:
         reply = self.media.render(f"Making the video of draft {source.id}", " / ".join(filter(None, recipe["lines"])),
                                   work, then=placed)
         if "error" not in reply:
+            v = recipe["voice"]
             reply.update(source=source.id, into=f"draft {target.id}, made again" if target else "a new draft",
+                         voice=f"{v['name']}" + (f" ({v['description']})" if v.get("description") else ""),
+                         speed=recipe["speed"], sound=recipe["sound"],
                          post=platforms.label(platform, where), size=f"{size[0]}x{size[1]}",
                          expected_time=f"about {max(15, said // 12)} seconds",
                          note="it is made in the background and shown when ready; you'll be told")
@@ -845,7 +868,8 @@ class StudioSession:
         problems = [f"{c['status']}, {c['label'].lower()}: {c['detail']}" for c in d.check.get("checks", [])
                     if c["status"] != "pass"]
         video = {"made_from": f"draft {d.video['from']}", **{k: d.video[k] for k in ("lines", "cta", "cta_line",
-                 "music", "captions", "motion") if d.video.get(k) not in (None, "")}} if d.video else None
+                 "music", "captions", "motion", "speed", "sound") if d.video.get(k) not in (None, "")},
+                 **({"voice": d.video["voice"].get("name")} if d.video.get("voice") else {})} if d.video else None
         return {"draft": d.id, "version": d.version, "post": d.label, "size": f"{w}x{h}", "title": d.title,
                 **({"video": video} if video else {}),
                 "caption": d.caption,

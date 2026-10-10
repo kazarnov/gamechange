@@ -1,10 +1,10 @@
 """A post made into a short video: its pictures in motion and the assistant's voice over them.
 
 One picture or several: each moves the whole time it is on screen (a slow zoom in or out, or a pan,
-so a still looks filmed), its texts come in over it, the voice reads its line in the voice the user
-picked, the words show as captions, and an end card can close on the call to action ("Shop now")
-on a button. Background music from FlowAI Sound, when there is some, steps aside whenever the voice
-speaks. Frames are drawn with Pillow and encoded by ffmpeg as H.264 and AAC, which Instagram and X
+so a still looks filmed), its texts come in over it, the voice reads its line (the video's own voice:
+the user's, a recorded one or one picked for it, with a sound such as warm or broadcast), the words
+show as captions, and an end card can close on the call to action ("Shop now") on a button.
+Background music from FlowAI Sound, when there is some, steps aside whenever the voice speaks. Frames are drawn with Pillow and encoded by ffmpeg as H.264 and AAC, which Instagram and X
 take as they are.
 
 Timing comes from the voice: a shot lasts as long as its words take, plus a breath before and after.
@@ -38,6 +38,17 @@ ZOOM = 1.14  # how far a picture moves in or out; it is fitted this much larger,
 MOTIONS = ["zoom-in", "zoom-out", "pan-left", "pan-right", "pan-up", "pan-down", "still"]
 AUTO_MOTIONS = ["zoom-in", "pan-right", "zoom-out", "pan-left"]
 MUSIC_VOLUME = 0.6  # between lines; under the voice the compressor takes it about 10 dB lower
+# How the voice is treated before the music goes under it, for the assistant to pick from
+VOICE_SOUNDS = {"natural": "as it is", "warm": "fuller and softer, close", "bright": "crisp and airy",
+                "broadcast": "punchy and compressed, like a radio ad"}
+_VOICE_FILTERS = {
+    "natural": "",
+    "warm": "bass=g=3:f=160:w=0.7,treble=g=-1.5:f=7000,"
+            "acompressor=threshold=0.125:ratio=2.5:attack=10:release=150:makeup=1.5,",
+    "bright": "highpass=f=90,equalizer=f=3500:t=q:w=1.0:g=2.5,treble=g=3:f=9000,",
+    "broadcast": "highpass=f=80,acompressor=threshold=0.08:ratio=4:attack=4:release=60:makeup=2.5,"
+                 "equalizer=f=2800:t=q:w=1.2:g=2.5,alimiter=limit=0.95,",
+}
 # FlowAI Sound's moods (content-generator/sound/music.py), for the assistant to pick from
 MOODS = {"golden-hour": "warm lo-fi", "linen": "airy ambient", "atelier": "bright acoustic",
          "pulse": "upbeat house", "night-drive": "synthwave", "bloom": "dreamy, cinematic"}
@@ -62,6 +73,7 @@ class Look:
     captions: bool = True
     accent: str = "#ffffff"  # the end card's button
     safe: tuple[float, float] = (0.06, 0.06)  # top and bottom shares the app covers
+    voice_sound: str = "natural"  # one of VOICE_SOUNDS
 
 
 def ffmpeg() -> str:
@@ -377,17 +389,18 @@ def render(shots: list[Shot], look: Look, music: bytes | None = None,
         tmp = Path(tmp)
         _write_wav(tmp / "voice.wav", voice)
         inputs = ["-i", str(tmp / "voice.wav")]
+        treat = _VOICE_FILTERS.get(look.voice_sound, "")
         if music:
             (tmp / "music.wav").write_bytes(music)
             inputs += ["-i", str(tmp / "music.wav")]
             fade = max(0.0, total - 1.6)
-            audio = (f"[1:a]aresample=48000,asplit=2[v][key];"
+            audio = (f"[1:a]{treat}aresample=48000,asplit=2[v][key];"
                      f"[2:a]aresample=48000,volume={MUSIC_VOLUME},afade=t=in:d=0.8,afade=t=out:st={fade:.2f}:d=1.6[m];"
                      "[m][key]sidechaincompress=threshold=0.03:ratio=5:attack=15:release=450[bed];"
                      "[v][bed]amix=inputs=2:duration=first:normalize=0,"
                      "loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[a]")
         else:
-            audio = "[1:a]aresample=48000,loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[a]"
+            audio = f"[1:a]{treat}aresample=48000,loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[a]"
         out = tmp / "video.mp4"
         cmd = [ffmpeg(), "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}",
                "-r", str(FPS), "-i", "pipe:0", *inputs, "-filter_complex", audio, "-map", "0:v", "-map", "[a]",

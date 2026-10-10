@@ -48,8 +48,9 @@ Wire protocol
                                                change only the painted area (mode: change, remove,
                                                replace, improve)
               make_video {"draft": 1, "lines": [...], "cta", "cta_line", "music", "captions",
-                          "motion", "placement"}
-                                               the draft's pictures as a video with the voice
+                          "motion", "placement", "voice", "speed", "sound"}
+                                               the draft's pictures as a video with the voice (voice: a
+                                               ready voice's id, "assistant", or a description to match)
             {"type": "approve" | "decline", "id": 3, "conversation": "..."}
                                                the user's answer to an approval (scheduling, a campaign
                                                version); with "done": true the page did it itself
@@ -60,6 +61,11 @@ Wire protocol
                                                up first); kept for the user
             {"type": "preview_voice", "id" | "archetype": "..."}
                                                play how a voice sounds (it stops what is being said)
+            {"type": "record_voice", "name": "My voice", "script": "en", "data": "data:audio/wav;base64,..."}
+                                               the user reading one of the voices' scripts: cloned into
+                                               a voice of their own (voices.py)
+            {"type": "delete_voice", "id": "..."}
+                                               a voice the user recorded, gone
   server -> client
     binary: 4-byte little-endian turn id + PCM16 mono 24 kHz assistant speech
     json:   ready | vad | transcript | assistant_delta | assistant_done |
@@ -79,7 +85,10 @@ Wire protocol
             about (its name or campaign changed) |
             conversations (the user's conversations, newest first, and which one is on screen) |
             voice (the voice it speaks in: id, name, description, language) |
-            voices (the ones ready to use, catalog voices matching the search, and the current one) |
+            voices (the ones ready to use, the user's recorded ones first, catalog voices matching
+                    the search, the current one, and the scripts to read to record a voice) |
+            voice_recording (a recorded voice being made: checking, making, done with the voice,
+                             or failed with why) | voice_deleted |
             fonts (after ready: the fonts texts can use, by style, each with its file under fonts/)
 
 Conversations are kept (backend/conversations.py): this connection shows one at a time, and a
@@ -91,6 +100,7 @@ import json
 import logging
 import struct
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -98,8 +108,8 @@ import httpx
 import numpy as np
 from fastapi import WebSocket, WebSocketDisconnect
 
-from . import reel, tools
-from .asr import ASREngine, StreamingTranscription
+from . import reel, tools, voices
+from .asr import ASREngine, StreamingTranscription, resample
 from .browser import Browser
 from .browser_agent import BrowserAgent
 from .comfyui import ComfyClient, ComfyError
@@ -140,6 +150,14 @@ class BrowserJob:
     result: str | None = None
 
 
+def _voice(v: dict, recorded: str | None = None) -> dict:
+    """A voice as the page and a video keep it: recorded, the stem of a voice the user recorded."""
+    out = {k: v.get(k) for k in ("id", "name", "description", "language", "archetype")}
+    if recorded or v.get("recorded") or v.get("mine") or v.get("owner"):
+        out.update(mine=True, recorded=recorded or v.get("recorded"))
+    return out
+
+
 class VoiceSession:
     def __init__(self, ws: WebSocket, models: Models):
         self.ws = ws
@@ -152,6 +170,8 @@ class VoiceSession:
         self.conv = self.store.new(None if settings.flowai_url else "local")
         self.conv.sessions.add(self)
         self.voice: dict = models.tts.default  # every sentence in this voice (load_voice)
+        self.voice_lock = asyncio.Lock()  # recorded voices made again one at a time
+        self.recording = False  # a recorded voice being made
         self.flowai = self.new_flowai()
         self.flowai_loading: asyncio.Task | None = None
         self.switching = asyncio.Lock()  # one conversation change at a time
@@ -255,11 +275,15 @@ class VoiceSession:
             + "\n"
             "A text the platform check calls hard to read needs a panel (style box) or a colour that stands out "
             "from its picture; each slide lists its picture's colours, which make texts look part of the post. "
-            "make_video turns a draft, with one picture or several, into a short video: your voice reads a line "
-            "per picture in the user's chosen voice while the pictures slowly zoom and pan, with captions, music "
-            "and an end card with a call to action ('Order now'). Write the lines like a short spoken ad: a hook, "
-            "one idea per picture, then the call to action in cta_line. It is made in the background into its "
-            "own draft; asking again (other words, music, button) makes that same video again. "
+            "make_video turns a draft, with one picture or several, into a short video: a voice reads a line "
+            "per picture while the pictures slowly zoom and pan, with captions, music and an end card with a call "
+            "to action ('Order now'). Write the lines like a short spoken ad: a hook, one idea per picture, then "
+            "the call to action in cta_line. It is made in the background into its own draft; asking again (other "
+            "words, music, button) makes that same video again. Its voice is the one you speak in until changed; "
+            "when the user lets you choose, or asks for a kind of voice, pick one that fits the brand and the "
+            "lines: describe it in voice (e.g. 'young female upbeat advertisement'), with speed and sound to "
+            "match (an upbeat sale: 1.1 and broadcast; luxury: 0.9 and warm), and say in a few words which voice "
+            "you chose. The user can record their own voice on screen; then voice 'recorded' reads it in theirs. "
             "Make independent changes together in one step. Change only what the user named (the headline is one "
             "text) and keep everything else. Never leave a placeholder such as [date] or [link] in a caption or "
             "text: write the real words (\"this Friday\") or ask. The user sees every new version, so say in a few "
@@ -370,6 +394,10 @@ class VoiceSession:
                 self.spawn(self.set_voice(msg))
             case "preview_voice":
                 self.spawn(self.preview_voice(msg))
+            case "record_voice":
+                self.spawn(self.record_voice(msg))
+            case "delete_voice":
+                self.spawn(self.delete_voice(msg))
 
     async def on_upload(self, msg: dict):
         try:
@@ -445,9 +473,11 @@ class VoiceSession:
                    "; it is being edited and goes on the slide by itself"
         elif name == "make_video":
             result = await self.make_video(draft, **{k: msg[k] for k in ("lines", "cta", "cta_line", "music", "captions",
-                                                                      "motion", "placement", "color") if k in msg})
+                                                                      "motion", "placement", "color", "voice",
+                                                                      "speed", "sound") if k in msg})
             done = f"asked for a video of draft {result.get('source')} with these lines: " \
-                   f"{json.dumps(msg.get('lines'), ensure_ascii=False)}; it is being made into {result.get('into')}"
+                   f"{json.dumps(msg.get('lines'), ensure_ascii=False)}, read by {result.get('voice')}; it is " \
+                   f"being made into {result.get('into')}"
         elif name == "open_campaign" and self.flowai:
             if self.flowai_loading:
                 await self.flowai_loading  # its accounts say which platform each post is for
@@ -540,6 +570,8 @@ class VoiceSession:
     # --- voice ----------------------------------------------------------------------
     # Every sentence is spoken in one voice: the user's pick, kept with their conversations
     # (prefs.json), so it's the same in all of them and after a reload; until they pick, TTS_VOICE.
+    # A video has a voice of its own, kept with it (make_video): at first this one, or one the user
+    # recorded, or one picked for the video. A recorded voice is only its owner's (voices.py).
 
     async def load_voice(self):
         if self.flowai_loading:
@@ -547,28 +579,74 @@ class VoiceSession:
         saved = (await self.store.prefs(self.owner)).get("voice") if self.owner else None
         if saved:
             try:
-                self.voice = await asyncio.to_thread(self.find_voice, saved)
+                self.voice = await self.usable(saved)
+            except ValueError:
+                self.voice = self.m.tts.default  # a recorded voice since deleted
             except Exception as exc:
                 log.warning("voice %s couldn't be checked: %s", saved.get("id"), exc)
                 self.voice = saved  # the voice server is down: nothing is spoken anyway
         await self.try_send(type="voice", **self.voice)
 
-    def find_voice(self, saved: dict) -> dict:
-        """The saved pick if the server still has it; made again if it came from the catalog (a new
-        pod starts with only its demo voice), the same voice as before; else the default."""
-        tts = self.m.tts
-        for v in tts.profiles():
-            if v["id"] == saved.get("id"):
-                return v
-        return tts.adopt(saved["archetype"]) if saved.get("archetype") else tts.default
+    async def recorded(self) -> list[dict]:
+        """The voices the user recorded: id on the voice server, stem of the kept files, name, text read."""
+        return list((await self.store.prefs(self.owner)).get("recorded") or []) if self.owner else []
+
+    async def ready_voices(self) -> list[dict]:
+        """The voices ready to use, the user's recorded ones first, made again from their kept recordings if
+        the voice server lost them; nobody else's recorded voices."""
+        tts, mark = self.m.tts, voices.owner_tag(self.owner) if self.owner else None
+        profiles = await asyncio.to_thread(tts.profiles)
+        entries = await self.recorded()
+        have = {p["id"] for p in profiles}
+        if lost := [e for e in entries if e["id"] not in have]:
+            async with self.voice_lock:
+                folder = self.store.voices_dir(self.owner)
+                for e in lost:
+                    try:
+                        ref = (folder / f"{e['stem']}.wav").read_bytes()
+                        reading = folder / f"{e['stem']}-reading.wav"
+                        made = await asyncio.to_thread(tts.clone, e["name"], ref, e["text"], mark,
+                                                       reading.read_bytes() if reading.exists() else None)
+                    except Exception as exc:
+                        log.warning("recorded voice %s couldn't be made again: %s", e["name"], exc)
+                        continue
+                    log.info("recorded voice %s made again: %s -> %s", e["name"], e["id"], made["id"])
+                    if (self.voice.get("recorded") or "") == e["stem"]:
+                        self.voice = {**self.voice, "id": made["id"]}
+                    e["id"] = made["id"]
+                    profiles.append(made)
+                await self.store.set_prefs(self.owner, recorded=entries)
+        stems = {e["id"]: e["stem"] for e in entries}
+        ready = [_voice(p, stems.get(p["id"])) for p in profiles if not p.get("owner") or p["owner"] == mark]
+        return sorted(ready, key=lambda v: not v.get("mine"))
+
+    async def usable(self, v: dict) -> dict:
+        """v set up on the voice server: as it is, or made again if the server lost it (a recorded voice
+        from its recording, a catalog one from the catalog). ValueError when it can't be."""
+        try:
+            ready = await self.ready_voices()
+            if v.get("recorded"):
+                if found := next((r for r in ready if r.get("recorded") == v["recorded"]), None):
+                    return found
+                raise ValueError("that recorded voice was deleted")
+            if found := next((r for r in ready if r["id"] == v.get("id")), None):
+                return found
+            if v.get("archetype"):
+                return _voice(await asyncio.to_thread(self.m.tts.adopt, v["archetype"]))
+        except httpx.HTTPError as exc:
+            log.warning("voice %s couldn't be set up: %s", v.get("id"), exc)
+            raise ValueError("the voice server didn't answer; try again in a moment") from exc
+        if v.get("id") == self.m.tts.default["id"]:
+            return _voice(self.m.tts.default)
+        raise ValueError("the voice server doesn't have it any more")
 
     async def set_voice(self, msg: dict):
         tts = self.m.tts
         try:
             if msg.get("archetype"):
-                voice = await asyncio.to_thread(tts.adopt, str(msg["archetype"]))
+                voice = _voice(await asyncio.to_thread(tts.adopt, str(msg["archetype"])))
             else:
-                voice = next((v for v in await asyncio.to_thread(tts.profiles) if v["id"] == msg.get("id")), None)
+                voice = next((v for v in await self.ready_voices() if v["id"] == msg.get("id")), None)
         except Exception as exc:
             log.warning("voice %s couldn't be set up: %s", msg.get("archetype") or msg.get("id"), exc)
             voice = None
@@ -584,7 +662,7 @@ class VoiceSession:
     async def send_voices(self, q: str, lang: str):
         tts = self.m.tts
         try:
-            ready = await asyncio.to_thread(tts.profiles)
+            ready = await self.ready_voices()
             # A catalog voice already set up is among the ready ones
             catalog, total, languages = await asyncio.to_thread(
                 tts.catalog, q, lang, {v["archetype"] for v in ready if v["archetype"]})
@@ -592,22 +670,165 @@ class VoiceSession:
             log.warning("voices couldn't be listed: %s", exc)
             return await self.try_send(type="error", message="The voice server didn't answer. Try again in a moment.")
         await self.try_send(type="voices", q=q, lang=lang, current=self.voice["id"], choosable=tts.choosable,
-                            ready=ready, catalog=catalog, total=total, languages=languages)
+                            ready=ready, catalog=catalog, total=total, languages=languages,
+                            recordable=tts.choosable and bool(self.owner),
+                            scripts=[{"id": k, **v} for k, v in voices.SCRIPTS.items()])
 
     async def preview_voice(self, msg: dict):
         """How a voice sounds, played like speech: it cuts off whatever was being said."""
         try:
+            if msg.get("id") and not any(v["id"] == msg["id"] for v in await self.ready_voices()):
+                raise ValueError("not one of this user's voices")
             audio = await asyncio.to_thread(self.m.tts.sample, msg.get("id") or None, msg.get("archetype") or None)
         except Exception as exc:
             log.warning("voice %s couldn't be played: %s", msg.get("archetype") or msg.get("id"), exc)
             return await self.try_send(type="error", message="That voice can't be played right now.")
+        await self.play(audio)
+
+    async def play(self, audio: np.ndarray):
         await self.interrupt()
         await self.send_audio(self.turn, audio)
         self.speaking_until = time.monotonic() + len(audio) / TTS_RATE
 
-    async def make_video(self, draft=None, **asked) -> dict:
-        """make_video in the voice the user picked, with FlowAI Sound's music if it's there."""
-        tts, voice = self.m.tts, self.voice["id"]
+    async def record_voice(self, msg: dict):
+        """A voice of the user's own from their reading of a script: checked (the speech recognition must
+        hear the script), cleaned up, cloned with the reading as its consent, and kept to make it again."""
+        tts, owner = self.m.tts, self.owner
+
+        async def state(now: str, **more):
+            await self.try_send(type="voice_recording", state=now, **more)
+
+        script_id = str(msg.get("script") or "en")
+        script = voices.SCRIPTS.get(script_id)
+        if not tts.choosable:
+            return await state("failed", message="Recording a voice needs the VoiceStudio server (TTS_URL).")
+        if not owner:
+            return await state("failed", message="Sign in to FlowAI first: a recorded voice is kept for you.")
+        if not script:
+            return await state("failed", message="Read one of the texts shown.")
+        if self.recording:
+            return await state("failed", message="A voice is already being made. Wait for it to finish.")
+        name = " ".join(str(msg.get("name") or "").split())[:40] or "My voice"
+        self.recording = True
+        try:
+            await state("checking")
+            try:
+                audio = await asyncio.to_thread(lambda: voices.check(voices.read_recording(str(msg.get("data") or ""))))
+            except voices.RecordingError as exc:
+                return await state("failed", message=f"{str(exc)[:1].upper()}{str(exc)[1:]}.")
+            asr = self.m.asr
+            said = await asyncio.to_thread(asr.transcribe, resample(audio, voices.RATE, asr.sample_rate))
+            share = voices.heard(said, script["text"])
+            log.info("recorded voice: %.1f s, %.0f%% of the script heard", len(audio) / voices.RATE, share * 100)
+            if share < voices.HEARD:
+                return await state("failed", heard=said, message="That didn’t sound like the text on screen. "
+                                                                 "Read it once more, clearly, from start to end.")
+            reading = voices.wav(audio)
+            await state("making")
+            try:
+                ref = await asyncio.to_thread(tts.clean, reading)
+            except Exception as exc:
+                log.warning("the recording couldn't be cleaned up, so it's cloned as it is: %s", exc)
+                ref = reading
+            text = script["text"] if share >= voices.WORD_FOR_WORD else said
+            made = await asyncio.to_thread(tts.clone, name, ref, text, voices.owner_tag(owner), reading)
+            stem = uuid.uuid4().hex[:12]
+            folder = self.store.voices_dir(owner)
+
+            def keep():
+                folder.mkdir(parents=True, exist_ok=True)
+                (folder / f"{stem}.wav").write_bytes(ref)
+                (folder / f"{stem}-reading.wav").write_bytes(reading)
+            await asyncio.to_thread(keep)
+            entries = await self.recorded()
+            entries.append({"id": made["id"], "stem": stem, "name": name, "text": text, "script": script_id,
+                            "made": datetime.now().isoformat(timespec="seconds")})
+            await self.store.set_prefs(owner, recorded=entries)
+        except Exception as exc:
+            log.warning("a recorded voice couldn't be made: %s", exc)
+            return await state("failed", message="The voice server couldn’t make the voice. Try again in a moment.")
+        finally:
+            self.recording = False
+        voice = _voice(made, stem)
+        log.info("recorded voice %s: %s", name, voice["id"])
+        await state("done", voice=voice)
+        self.remember(f"On screen, the user recorded their own voice as “{name}”: make_video can read a video in it "
+                      f"(voice: “{name}”).")
+        try:  # how it sounds
+            await self.play(await asyncio.to_thread(tts.synthesize, voices.SAMPLES[script_id], voice["id"]))
+        except Exception as exc:
+            log.warning("the recorded voice's sample couldn't be played: %s", exc)
+
+    async def delete_voice(self, msg: dict):
+        """A voice the user recorded: off the voice server, and its kept recording gone."""
+        entries = await self.recorded()
+        entry = next((e for e in entries if e["id"] == msg.get("id")), None)
+        if not entry:
+            return await self.try_send(type="error", message="Only a voice you recorded can be deleted.")
+        try:
+            await asyncio.to_thread(self.m.tts.delete, entry["id"])
+        except Exception as exc:
+            log.warning("recorded voice %s couldn't be deleted: %s", entry["id"], exc)
+            return await self.try_send(type="error", message="The voice server didn’t answer. Try again in a moment.")
+        folder = self.store.voices_dir(self.owner)
+        for f in (folder / f"{entry['stem']}.wav", folder / f"{entry['stem']}-reading.wav"):
+            f.unlink(missing_ok=True)
+        await self.store.set_prefs(self.owner, recorded=[e for e in entries if e is not entry])
+        log.info("recorded voice %s deleted", entry["name"])
+        if self.voice.get("id") == entry["id"]:
+            self.voice = _voice(self.m.tts.default)
+            await self.store.set_prefs(self.owner, voice=self.voice)
+            await self.try_send(type="voice", **self.voice)
+        await self.try_send(type="voice_deleted", id=entry["id"])
+        self.remember(f"On screen, the user deleted their recorded voice “{entry['name']}”.")
+
+    # The words for "the voice you speak in" and "the voice the user recorded", for make_video's voice
+    ASSISTANT_VOICE = {"assistant", "your voice", "yours", "your own voice", "default", "same", "same as you",
+                       "the assistant", "the assistants voice", "assistants voice"}
+    RECORDED_VOICE = {"recorded", "my voice", "my own voice", "my recorded voice", "mine", "me", "cloned",
+                      "my cloned voice", "clone", "user", "the user", "users voice", "the users voice",
+                      "their voice", "their own voice", "own voice", "own", "recorded voice"}
+
+    async def video_voice(self, asked) -> tuple[dict | None, list[dict]]:
+        """The voice make_video was asked for (None: keep the video's), and other catalog voices close to a
+        description. A ready voice by id or name, the assistant's, the user's recorded one, a catalog voice
+        by name, or the catalog voice closest to a description. ValueError when there's none like it."""
+        if isinstance(asked, dict):
+            asked = asked.get("id") or asked.get("name")
+        said = " ".join(str(asked or "").split())
+        if not said:
+            return None, []
+        key = " ".join(voices.words(said.replace("'", "").replace("’", "")))
+        if key in self.ASSISTANT_VOICE:
+            return self.voice, []
+        tts = self.m.tts
+        try:
+            ready = await self.ready_voices()
+            if v := voices.named(ready, said):
+                return v, []
+            if key in self.RECORDED_VOICE:
+                if mine := [r for r in ready if r.get("mine")]:
+                    return mine[-1], []
+                raise ValueError("the user hasn't recorded their voice yet: they can, with Record my voice under "
+                                 "the draft's Video")
+            if not tts.choosable:
+                raise ValueError("this assistant has only its one voice (no VoiceStudio server)")
+            catalog = await asyncio.to_thread(tts.catalog_voices)
+            close = [v] if (v := voices.named(catalog, said)) else voices.match(catalog, said)
+            if not close:
+                raise ValueError(f"no voice is like “{said}”: describe it with fewer words")
+            return _voice(await asyncio.to_thread(tts.adopt, close[0]["id"])), close[1:]
+        except httpx.HTTPError as exc:
+            log.warning("voices couldn't be read: %s", exc)
+            raise ValueError("the voice server didn't answer; try again in a moment") from exc
+
+    async def make_video(self, draft=None, voice=None, **asked) -> dict:
+        """make_video in the video's voice, with FlowAI Sound's music if it's there."""
+        tts = self.m.tts
+        try:
+            chosen, others = await self.video_voice(voice)
+        except ValueError as exc:
+            return {"error": str(exc)}
 
         def compose(mood: str, seconds: float) -> bytes | None:  # in the render's thread
             try:
@@ -619,8 +840,13 @@ class VoiceSession:
                 log.warning("no music for the video: %s", exc)
                 return None
 
-        return await self.studio.make_video(draft, **asked, speak=lambda text: tts.synthesize(text, voice),
-                                            compose=compose if settings.sound_url else None, moods=tuple(reel.MOODS))
+        reply = await self.studio.make_video(
+            draft, **asked, voice=chosen, default_voice=_voice(self.voice), ready_voice=self.usable,
+            speak=lambda text, voice_id, speed: tts.synthesize(text, voice_id, speed),
+            compose=compose if settings.sound_url else None, moods=tuple(reel.MOODS))
+        if others and "error" not in reply:
+            reply["other_voices_like_it"] = [f"{v['name']} ({v['description']})" for v in others]
+        return reply
 
     def focus_note(self) -> str | None:
         """What the user selected or painted on screen, for "this" and "it", when it changed since the LLM

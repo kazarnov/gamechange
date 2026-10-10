@@ -86,11 +86,11 @@ class TTSEngine:
             log.warning("Best designed voice only scored %.2f; consider TTS_REF_AUDIO", best_score)
         return best
 
-    def synthesize(self, text: str, voice: str | None = None) -> np.ndarray:
-        """Returns float32 mono audio at 24 kHz, always in the one voice."""
+    def synthesize(self, text: str, voice: str | None = None, speed: float = 1.0) -> np.ndarray:
+        """Returns float32 mono audio at 24 kHz, always in the one voice; speed: against TTS_SPEED."""
         with self.lock, torch.inference_mode():
             audio = self.model.generate(
-                text=text, voice_clone_prompt=self.voice, num_step=self.num_step, speed=self.speed
+                text=text, voice_clone_prompt=self.voice, num_step=self.num_step, speed=self.speed * speed
             )[0]
         return np.asarray(audio, dtype=np.float32)
 
@@ -100,8 +100,20 @@ class TTSEngine:
     def catalog(self, q: str = "", lang: str = "", exclude: set[str] = frozenset()) -> tuple[list[dict], int, list[str]]:
         return [], 0, []
 
+    def catalog_voices(self) -> list[dict]:
+        return []
+
     def adopt(self, archetype: str) -> dict:
         raise ValueError("voices can only be picked with a VoiceStudio server (TTS_URL)")
+
+    def clean(self, audio: bytes) -> bytes:
+        return audio
+
+    def clone(self, name: str, audio: bytes, text: str, owner: str, consent: bytes | None = None) -> dict:
+        raise ValueError("a voice can only be recorded with a VoiceStudio server (TTS_URL)")
+
+    def delete(self, voice: str):
+        raise ValueError("there is only the one voice here")
 
     def sample(self, voice: str | None = None, archetype: str | None = None) -> np.ndarray:
         return self.synthesize(REFERENCE_TEXT)

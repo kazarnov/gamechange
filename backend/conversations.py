@@ -4,9 +4,10 @@ page can list them, switch between them and pick one up again later, or after a 
 A conversation stays in memory while a connection shows it, or while a picture or video is still
 being made for it (it goes into its draft even if the user has moved on); otherwise only its file
 is kept: DATA_DIR/conversations/<owner>/<id>.json, plus index.json per owner for the list, and
-prefs.json for what holds across their conversations (the voice). The owner is the FlowAI user
-it belongs to ("local" when FlowAI is off). When FlowAI can't say who the
-user is, the conversation isn't kept at all, so nobody's conversations end up in a shared folder.
+prefs.json for what holds across their conversations (the voice, and the voices they recorded, whose
+recordings are in voices/). The owner is the FlowAI user it belongs to ("local" when FlowAI is off).
+When FlowAI can't say who the user is, the conversation isn't kept at all, so nobody's conversations
+end up in a shared folder.
 """
 
 import asyncio
@@ -324,6 +325,10 @@ class ConversationStore:
             await asyncio.to_thread(self._write, self._dir(owner), cid, None, None)
         await asyncio.to_thread(_remove, [self._dir(owner) / f"{cid}.json", *files])
 
+
+    def voices_dir(self, owner: str) -> Path:
+        """The recordings of the voices this user recorded (session.py, record_voice), to make them again."""
+        return self._dir(owner) / "voices"
 
     async def prefs(self, owner: str) -> dict:
         return await asyncio.to_thread(_read_json, self._dir(owner) / "prefs.json")

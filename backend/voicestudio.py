@@ -39,12 +39,13 @@ def _first_sentence(text: str) -> str:
 
 
 def _profile(p: dict) -> dict:
-    """A profile as the page shows it."""
+    """A profile as the page shows it. owner: a recorded voice's owner mark (voices.owner_tag)."""
     tag = str(p.get("personality") or "")
     return {"id": p["id"], "name": p.get("name") or p["id"],
             "description": _first_sentence(p.get("description")) or p.get("instruct") or "",
             "language": p.get("language") or "",
-            "archetype": tag.removeprefix("archetype:") if tag.startswith("archetype:") else None}
+            "archetype": tag.removeprefix("archetype:") if tag.startswith("archetype:") else None,
+            "owner": tag if tag.startswith("clone:") else None}
 
 
 def _archetype(a: dict) -> dict:
@@ -79,7 +80,7 @@ class VoiceStudioTTS:
         self._catalog_lock = threading.Lock()
         t0 = time.perf_counter()
         self.default = self._default(voice)
-        self._speech("Warming up.", self.default["id"])  # the server loads the model on its first request (about a minute)
+        self._speech("Warming up.", self.default["id"], self.speed)  # the server loads the model on its first request (about a minute)
         log.info("TTS: VoiceStudio at %s, ready in %.1f s; voice %s (%s)", url, time.perf_counter() - t0,
                  self.default["name"], self.default["id"])
 
@@ -105,16 +106,17 @@ class VoiceStudioTTS:
         return {"id": "default", "name": "VoiceStudio default", "description": "A different voice each sentence",
                 "language": "", "archetype": None}
 
-    def _speech(self, text: str, voice: str) -> np.ndarray:
+    def _speech(self, text: str, voice: str, speed: float) -> np.ndarray:
         r = self.http.post("/v1/audio/speech", json={"model": self.model, "input": text, "voice": voice,
-                                                     "speed": self.speed, "response_format": "pcm"})
+                                                     "speed": speed, "response_format": "pcm"})
         r.raise_for_status()
         return np.frombuffer(r.content, dtype="<i2").astype(np.float32) / 32768.0
 
-    def synthesize(self, text: str, voice: str | None = None) -> np.ndarray:
+    def synthesize(self, text: str, voice: str | None = None, speed: float = 1.0) -> np.ndarray:
+        """speed: against the usual pace (TTS_SPEED), e.g. 1.1 for a little quicker."""
         for attempt in (1, 2):
             try:
-                return self._speech(text, voice or self.default["id"])
+                return self._speech(text, voice or self.default["id"], min(max(self.speed * speed, 0.25), 4.0))
             except httpx.HTTPError as exc:
                 log.warning("VoiceStudio speech failed (attempt %d): %s", attempt, exc)
         return np.zeros(0, dtype=np.float32)  # the words still show on screen
@@ -147,6 +149,10 @@ class VoiceStudioTTS:
         languages = sorted({v["language"] for v in voices if v["language"]}, key=lambda x: (x != "English", x))
         return found[:CATALOG_SHOWN], len(found), languages
 
+    def catalog_voices(self) -> list[dict]:
+        """The whole catalog."""
+        return self._load_catalog()
+
     def _load_catalog(self) -> list[dict]:
         with self._catalog_lock:  # it doesn't change while the server runs: read it once
             if self._catalog is None:
@@ -172,3 +178,30 @@ class VoiceStudioTTS:
         r = self.http.get(path, timeout=120)
         r.raise_for_status()
         return _wav(r.content)[: SAMPLE_SECONDS * SAMPLE_RATE]
+
+    # --- the user's own voice (voices.py) ---------------------------------------------
+
+    def clean(self, audio: bytes) -> bytes:
+        """A recording with the room's noise taken out (VoiceStudio isolates the voice), as WAV."""
+        r = self.http.post("/clean-audio", files={"audio": ("recording.wav", audio, "audio/wav")}, timeout=120)
+        r.raise_for_status()
+        return r.content
+
+    def clone(self, name: str, audio: bytes, text: str, owner: str, consent: bytes | None = None) -> dict:
+        """A voice cloned from a recording (WAV) of text being read, marked as owner's; the reading is
+        kept as its consent."""
+        r = self.http.post("/profiles", data={"name": name, "ref_text": text, "kind": "clone", "personality": owner},
+                           files={"ref_audio": ("voice.wav", audio, "audio/wav")})
+        r.raise_for_status()
+        profile = r.json()
+        try:
+            self.http.post(f"/profiles/{profile['id']}/consent", data={"consent_text": text},
+                           files={"consent_audio": ("consent.wav", consent or audio, "audio/wav")}).raise_for_status()
+        except httpx.HTTPError as exc:
+            log.warning("consent for voice %s wasn't recorded: %s", profile["id"], exc)
+        return _profile(profile)
+
+    def delete(self, voice: str):
+        r = self.http.delete(f"/profiles/{voice}")
+        if r.status_code != 404:
+            r.raise_for_status()

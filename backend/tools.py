@@ -20,7 +20,7 @@ from datetime import datetime
 
 from .config import ROOT, settings
 from .skills import load_skills
-from .reel import MOODS, MOTIONS
+from .reel import MOODS, MOTIONS, VOICE_SOUNDS
 from .studio import EDIT_MODES, POSITIONS, SIZES, STYLES
 
 log = logging.getLogger(__name__)
@@ -393,10 +393,10 @@ async def edit_area(mode: str, session, prompt: str = "", draft: int | None = No
 
 @tool(
     "make_video",
-    "Make a draft's pictures (one or several) into a short video: your voice reads a line per picture in the "
-    "user's voice while each picture slowly zooms or pans, with captions, music and an end card with a call to "
-    "action. It goes into a draft of its own (an Instagram reel or an X post), made in the background; asked "
-    "again, of either draft, that same video is made again with the changes.",
+    "Make a draft's pictures (one or several) into a short video: a voice reads a line per picture while each "
+    "picture slowly zooms or pans, with captions, music and an end card with a call to action. It goes into a "
+    "draft of its own (an Instagram reel or an X post), made in the background; asked again, of either draft, "
+    "that same video is made again with the changes. The video keeps its voice, speed and sound until changed.",
     {
         "type": "object",
         "properties": {
@@ -420,14 +420,28 @@ async def edit_area(mode: str, session, prompt: str = "", draft: int | None = No
                                       "side to side, one way then the other)"},
             "placement": {"type": "string", "description": "Instagram: reel (default), story or feed. X: post"},
             "color": {"type": "string", "description": "The end card button's colour (default: the post's own)"},
+            "voice": {"type": "string",
+                      "description": "Who reads it (leave out to keep the video's voice; the first time, the one you "
+                                     "speak in). 'assistant': the voice you speak in. 'recorded': the voice the user "
+                                     "recorded of their own. A voice by its name. Or describe the voice the video "
+                                     "needs in a few English words, and the closest of over a thousand voices reads "
+                                     "it: gender, age, accent, energy and use, e.g. 'young female upbeat "
+                                     "advertisement', 'deep male calm narrator british', 'female luxury'; add the "
+                                     "language for lines not in English, e.g. 'french female warm'"},
+            "speed": {"type": "number", "description": "How fast it reads, 0.8 to 1.3 (1 normal; 1.1 for an "
+                                                       "upbeat ad; 0.9 for calm or luxury)"},
+            "sound": {"type": "string", "enum": [*VOICE_SOUNDS],
+                      "description": "How the voice sounds: " + ", ".join(f"{k} ({v})" for k, v in VOICE_SOUNDS.items())},
         },
     },
 )
 async def make_video(session, draft: int | None = None, lines: list | None = None, cta: str | None = None,
                      cta_line: str | None = None, music: str | None = None, captions: bool | None = None,
-                     motion: str | None = None, placement: str | None = None, color: str | None = None):
+                     motion: str | None = None, placement: str | None = None, color: str | None = None,
+                     voice: str | None = None, speed: float | None = None, sound: str | None = None):
     return await session.make_video(draft, lines=lines, cta=cta, cta_line=cta_line, music=music, captions=captions,
-                                    motion=motion, placement=placement, color=color)
+                                    motion=motion, placement=placement, color=color, voice=voice, speed=speed,
+                                    sound=sound)
 
 
 @tool(
