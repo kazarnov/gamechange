@@ -249,6 +249,28 @@ class StudioSession:
             current.texts.remove(t)
         return await self._change(ref, change)
 
+    async def arrange(self, ref=None, order=None) -> dict:
+        """Slides in a new order, or some dropped (order: the slide numbers to keep, as they should
+        be); each slide keeps its texts."""
+        def change(d: Draft):
+            numbers = _numbers(order)
+            if not numbers or len(set(numbers)) != len(numbers) or not all(1 <= n <= len(d.slides) for n in numbers):
+                raise StudioError(f"order takes slide numbers from 1 to {len(d.slides)}, each once")
+            d.slides = [d.slides[n - 1] for n in numbers]
+        return await self._change(ref, change)
+
+    async def place(self, ref=None, media=None, slide=None) -> dict:
+        """A picture or video on one slide (its texts stay), or as a new last slide without `slide`."""
+        def change(d: Draft):
+            item = self._item(_number(media))
+            if slide in (None, ""):
+                d.slides.append(Slide())
+            target = d.slides[-1] if slide in (None, "") else self._slide(d, slide)
+            if item.kind == "video" and target.texts:
+                raise StudioError("text can't be drawn on videos yet; remove that slide's texts first")
+            target.media = item.id
+        return await self._change(ref, change)
+
     async def undo(self, ref=None) -> dict:
         try:
             d = self.get(ref)
@@ -487,6 +509,8 @@ class StudioSession:
         return {"type": "draft", "id": d.id, "version": d.version, "title": d.title, "label": d.label,
                 "platform": d.platform, "placement": d.placement, "size": list(d.size), "caption": d.caption,
                 "caption_limit": platforms.spec(d.platform, d.placement)["caption"],
+                "placements": platforms.placements(d.platform),
+                "max_slides": platforms.spec(d.platform, d.placement)["items"][1],
                 "slides": [{"url": f"media/{path.name}", "kind": f.kind, "media": slide.media, "texts": boxes}
                            for (path, f), slide, boxes in zip(d.files, d.slides, d.boxes)],
                 "check": d.check}
@@ -520,7 +544,8 @@ class StudioSession:
                 taken[t.position] = taken.get(t.position, 0) + height
                 boxes[t.id] = {"id": t.id, "words": t.text,  # as fractions of the slide, for the page
                                "box": [round(x / size[0], 4), round(y / size[1], 4),
-                                       round(w / size[0], 4), round(h / size[1], 4)]}
+                                       round(w / size[0], 4), round(h / size[1], 4)],
+                               **{k: getattr(t, k) for k in LOOK}}
             path = self.dir / f"draft{d.id}-v{version}-{i}-{uuid.uuid4().hex[:6]}.jpg"
             img.save(path, "JPEG", quality=90, optimize=True)
             out.append((path, File("image", size[0], size[1], path.stat().st_size)))

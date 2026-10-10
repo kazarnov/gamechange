@@ -10,8 +10,9 @@ shows an Approve button, and only that click ({"type": "approve"} on the WebSock
 post. In FlowAI's own page, the page makes that call itself with the user's session
 (FLOWAI_INTEGRATION.md).
 
-Until FlowAI issues the assistant a token (FLOWAI_INTEGRATION.md, change 1), the client signs in
-the way the dashboard does: Sanctum's session cookie, as FLOWAI_EMAIL.
+FlowAI's Assistant page hands over the signed-in user's token (POST /api/assistant/session, sent
+in the page's hello), so the assistant acts as whoever opened it. Without one (this repo's own
+page), the client signs in the way the dashboard does: Sanctum's session cookie, as FLOWAI_EMAIL.
 """
 
 import asyncio
@@ -198,6 +199,11 @@ class FlowAISession:
         self.approvals: dict[int, Approval] = {}
         self.uploaded: set[int] = set()  # assets this conversation uploaded: the only ones it deletes
 
+    async def use_token(self, token: str):
+        """The page's own sign-in (FlowAI's POST /api/assistant/session): act as that user from now on."""
+        old, self.client = self.client, FlowAIClient(self.client.base_url, self.client.dashboard_url, token=token)
+        await old.close()
+
     def set_timezone(self, name: str):
         try:
             self.tz = ZoneInfo(str(name))
@@ -350,16 +356,18 @@ class FlowAISession:
         try:
             ids = _numbers(assets)
             found = {a["id"]: a for a in (await self.client.get("/api/assets", ids=",".join(map(str, ids))))["data"]}
-            added = []
+            added, numbers = [], []
             for i in ids:
                 a = found.get(i)
                 if not a or a["kind"] not in ("image", "video"):
                     raise StudioError(f"there is no picture or video {i} in the FlowAI gallery")
                 item = await self.media.add(await self.client.request("GET", a["url"]), a["name"], a["kind"], "flowai")
                 added.append(f"asset {i} is {item.kind} number {item.id}")
+                numbers.append(item.id)
         except (StudioError, FlowAIError) as exc:
             return {"error": str(exc)}
-        return {"added": added, "note": "use these numbers in drafts, e.g. media in create_draft or update_draft"}
+        return {"added": added, "numbers": numbers,
+                "note": "use these numbers in drafts, e.g. media in create_draft or update_draft"}
 
     async def schedule(self, ref=None, when=None) -> dict:
         """Asks the user to approve publishing a draft at a time; saves it first if needed."""

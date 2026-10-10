@@ -11,14 +11,29 @@ Wire protocol
             {"type": "upload", "name": "x.json", "workflow": {...}}
                                                attach a ComfyUI workflow file
             {"type": "reset"}                  clear conversation history
-            {"type": "hello", "timezone": "Europe/Paris"}
-                                               the user's time zone, for scheduling
+            {"type": "hello", "timezone": "Europe/Paris", "token": "..."}
+                                               the user's time zone, for scheduling; token (optional):
+                                               the page's FlowAI sign-in (POST /api/assistant/session),
+                                               so the assistant acts as that user
             {"type": "focus", "draft": 1, "slide": 1, "text": 2}
                                                what the user selected on screen ("this", "it");
                                                {"type": "focus"} clears it
-            {"type": "action", "name": "undo" | "save", "draft": 1}
-            {"type": "action", "name": "open_post", "post": 12}
-                                               a button on the page, done without the LLM
+            {"type": "action", "name": ..., ...}
+                                               a button on the page, done without the LLM:
+              undo, save {"draft": 1}
+              open_post {"post": 12}
+              edit {"draft": 1, "title" | "caption" | "placement": "..."}
+              edit_text {"draft": 1, "text": 2, "words": "...", "position", "size", "color", ...}
+              add_text {"draft": 1, "slide": 1, "words": "...", "position", ...}
+              remove_text {"draft": 1, "text": 2}
+              arrange {"draft": 1, "order": [2, 1]}     slides reordered or dropped
+              place {"draft": 1, "media": 4, "slide": 2}
+                                               a picture on a slide (no slide: a new last one)
+              new_draft {"platform": "instagram", "placement": "feed"}
+              use_assets {"assets": [7, 8], "draft": 1}
+                                               FlowAI gallery files into the conversation (and the draft)
+              schedule {"draft": 1, "when": "2026-10-16T09:00:00Z"}
+                                               asks for approval, like schedule_post
             {"type": "approve" | "decline", "id": 3}
                                                the user's answer to an approval (scheduling); with
                                                "done": true the page booked the post itself
@@ -57,7 +72,7 @@ from .flowai import FlowAIClient, FlowAISession
 from .llm import LLM
 from .media import MediaSession
 from .skills import catalogue, load_skills
-from .studio import StudioSession
+from .studio import LOOK, StudioSession
 from .tts import SAMPLE_RATE as TTS_RATE
 from .tts import SentenceChunker, TTSEngine
 from .vad import TurnDetector
@@ -219,10 +234,14 @@ class VoiceSession:
 
     # --- main loop ----------------------------------------------------------------
 
+    def load_flowai(self):
+        """Reads the user and their accounts once: on the page's hello, which may carry its sign-in,
+        or on the first turn for a page that doesn't say hello."""
+        if self.flowai and not self.flowai_loading:
+            self.flowai_loading = asyncio.create_task(self.flowai.load())
+
     async def run(self):
         await self.send(type="ready", tts_sample_rate=TTS_RATE, asr_mode=settings.asr_mode)
-        if self.flowai:
-            self.flowai_loading = asyncio.create_task(self.flowai.load())
         try:
             while True:
                 msg = await self.ws.receive()
@@ -258,6 +277,9 @@ class VoiceSession:
             case "hello":
                 if self.flowai:
                     self.flowai.set_timezone(msg.get("timezone", ""))
+                    if msg.get("token") and not self.flowai_loading:
+                        await self.flowai.use_token(str(msg["token"]))
+                    self.load_flowai()
             case "focus":
                 self.focus = {k: msg[k] for k in ("draft", "slide", "text") if msg.get(k) not in (None, "")}
             case "action" | "approve" | "decline":
@@ -291,16 +313,56 @@ class VoiceSession:
             if self.flowai:
                 await self.flowai.decide(msg.get("id"), approve=kind == "approve", done=bool(msg.get("done")))
             return
+        self.load_flowai()
+        draft, style = msg.get("draft"), {k: msg[k] for k in LOOK if msg.get(k) not in (None, "")}
         if name == "undo":
-            result = await self.studio.undo(msg.get("draft"))
+            result = await self.studio.undo(draft)
             done = f"pressed Undo on draft {result.get('draft')}: it is now as it was before its last change " \
                    f"(version {result.get('version')})"
         elif name == "save" and self.flowai:
-            result = await self.flowai.save(msg.get("draft"))
+            result = await self.flowai.save(draft)
             done = f"pressed Save: {result.get('saved')}"
         elif name == "open_post" and self.flowai:
             result = await self.flowai.open_post(msg.get("post"))
             done = f"opened a FlowAI post: {result.get('opened')}"
+        elif name == "edit":
+            fields = {k: msg[k] for k in ("title", "caption", "placement") if k in msg}
+            result = await self.studio.update(draft, **fields)
+            done = f"changed the {' and '.join(fields)} of draft {result.get('draft')} by hand"
+        elif name == "edit_text":
+            result = await self.studio.edit_text(draft, msg.get("text"), msg.get("words"), msg.get("slide"), **style)
+            done = f"changed text {msg.get('text')} of draft {result.get('draft')} by hand" + \
+                   (f" (its words are now “{msg['words']}”)" if msg.get("words") else "")
+        elif name == "add_text":
+            result = await self.studio.add_text(draft, msg.get("words", ""), msg.get("slide"), **style)
+            done = f"added the text “{msg.get('words')}” to slide {msg.get('slide') or 1} of draft {result.get('draft')}"
+        elif name == "remove_text":
+            result = await self.studio.remove_text(draft, msg.get("text"))
+            done = f"removed text {msg.get('text')} from draft {result.get('draft')}"
+        elif name == "arrange":
+            result = await self.studio.arrange(draft, msg.get("order"))
+            done = f"rearranged the slides of draft {result.get('draft')}: the old slides " \
+                   f"{', '.join(map(str, msg.get('order') or []))}, in that order"
+        elif name == "place":
+            result = await self.studio.place(draft, msg.get("media"), msg.get("slide"))
+            done = f"put picture {msg.get('media')} on " + (f"slide {msg['slide']}" if msg.get("slide") else
+                                                            "a new last slide") + f" of draft {result.get('draft')}"
+        elif name == "new_draft":
+            result = await self.studio.create(msg.get("platform") or "instagram", msg.get("placement"))
+            done = f"started an empty {result.get('post')} as draft {result.get('draft')}"
+        elif name == "use_assets" and self.flowai:
+            result = await self.flowai.use_assets(msg.get("assets"))
+            done = f"brought files from the FlowAI gallery into this conversation: {'; '.join(result.get('added', []))}"
+            if draft not in (None, "") and "error" not in result:  # and onto the draft, as new last slides
+                for number in result["numbers"]:
+                    placed = await self.studio.place(draft, number)
+                    if "error" in placed:
+                        result = placed
+                        break
+                done += f", then added them to draft {draft} as new slides"
+        elif name == "schedule" and self.flowai:
+            result = await self.flowai.schedule(draft, msg.get("when"))
+            done = f"asked to schedule a draft from the calendar: {result.get('asks')}"
         else:
             return
         if "error" in result:
@@ -410,6 +472,7 @@ class VoiceSession:
         """Answers user_text, or with None just reacts to pending notes (task results)."""
         if self.m.comfy:
             self.m.comfy.maybe_refresh()  # the workflow list in the prompt; picked up next turn
+        self.load_flowai()
         if self.flowai_loading and not self.flowai_loading.done():
             await asyncio.wait({self.flowai_loading}, timeout=5)  # the accounts go in the prompt
         self.messages[0]["content"] = self.system_prompt()

@@ -3,10 +3,20 @@
 The voice agent in this repo makes Instagram and X posts as drafts, edits them when asked
 ("remove the cup", "make the headline yellow", "now the same for X"), and checks them against
 each platform's specs. FlowAI (`content-generator/`) is the studio those posts end up in. This
-document is the plan for joining the two once the website is complete.
+document is the plan for joining the two.
 
-**Nothing in `content-generator/` has been changed.** Everything FlowAI needs is listed under
-[Changes in FlowAI](#changes-in-flowai), to be done later.
+**Status (2026-10-10).** Changes 1 to 4 are done in `content-generator/` for the local stack:
+- the token;
+- drafts only;
+- the Assistant tab;
+- the `assistant` service and the Vite proxy.
+
+Still to do:
+- production: the deploy compose service and the nginx blocks in change 4, waiting on
+  [where the agent runs](#open-decisions);
+- changes 5 to 10.
+
+Nothing is committed in `content-generator/`.
 
 ## How the two line up
 
@@ -38,17 +48,17 @@ FlowAI dashboard, /dashboard/assistant ──WebSocket /assistant/ws──▶ ag
         └── FlowAI API (Laravel) ◀── assistant token: assets, posts (drafts only), accounts, voice
 ```
 
-**A working version of that page is in this repo** (`web/index.html`, `web/agent.js`,
-`web/voice.js`), running against FlowAI's API today with the sign-in described under
-[the agent's part](#the-agents-part). Porting it means re-drawing it in React with FlowAI's
-components; the protocol, the events and the behaviour stay the same.
+That page is now FlowAI's Assistant tab (change 3), redrawn in React with FlowAI's components
+from this repo's own page (`web/index.html`, `web/agent.js`, `web/voice.js`). The protocol, the
+events and the behaviour are the same.
 
 ## Order of work
 
-1. **FlowAI changes 1 to 4** below: tokens, drafts only, the page, the route. After this, the
-   agent can be opened from the dashboard and act for the user.
-2. **Agent side**: done in this repo (see [the agent's part](#the-agents-part)), except
-   swapping its stand-in sign-in for the token from change 1.
+1. **FlowAI changes 1 to 4** below: tokens, drafts only, the page, the route. **Done** for the
+   local stack (2026-10-10). The agent opens from the dashboard and acts for the user. The
+   production part of change 4 is still to do.
+2. **Agent side**: done in this repo (see [the agent's part](#the-agents-part)), including the
+   token from change 1.
 3. **FlowAI changes 5 to 7**: provenance, editable drafts, story captions. Saved drafts can then
    be reopened with their texts still editable.
 4. **FlowAI change 8**: ComfyUI as a FlowAI media provider, so every picture is in one Gallery.
@@ -59,6 +69,17 @@ components; the protocol, the events and the behaviour stay the same.
 Paths are relative to `content-generator/`.
 
 ### 1. Let the agent act for a signed-in user
+
+**Done.** Built as planned, with three differences:
+- the token goes in the page's `hello`, not in a separate `auth` message;
+- the token has one ability, `assistant`;
+- `LimitAssistantToken` (on the api group) restricts it to the routes the agent's tools call.
+
+The parts:
+- `AssistantController`;
+- `User` uses `HasApiTokens`;
+- logout deletes the user's assistant tokens;
+- tests in `tests/Feature/AssistantTest.php`.
 
 **Why.** The dashboard signs in with Sanctum's session cookie. The agent is another service and
 needs a bearer token for the same user. The `personal_access_tokens` table already exists
@@ -78,6 +99,9 @@ never in the URL, so it doesn't end up in logs.
 
 ### 2. Drafts only, unless a person approves
 
+**Done** in `SavePostRequest`, as described below. The Assistant page's Approve books the post with
+the person's own session.
+
 **Why.** In `PostController::fill()`, a post saved with any status other than `draft` counts as
 the person's approval (`approved_at`, `approved_by`). If the agent's token could set `scheduled`,
 FlowAI would record a post the agent wrote as approved by the user. That breaks the two-gate rule
@@ -88,6 +112,19 @@ in `DECISIONS.md`.
 schedules from the Composer, which stays the approval step.
 
 ### 3. The assistant's own page
+
+**Done** as `frontend/src/dashboard/pages/Assistant.tsx` and `frontend/src/dashboard/assistant/`:
+- `link.ts`: the protocol;
+- `store.tsx`: one conversation for the whole dashboard;
+- the Conversation, Draft, Media and Calendar views;
+- a dock on other pages.
+
+Beyond the plan below:
+- editing by hand without the model: caption, title, placement, texts and their styles, slide
+  order, removing and adding slides (new `action` messages in `backend/session.py`);
+- the gallery inside the page;
+- FlowAI's week grid (`WeekGrid`, now exported from `pages/Calendar.tsx`), with drafts dropped on
+  a slot to book them.
 
 **What.** A page at `/dashboard/assistant`, ported from this repo's working page:
 
@@ -121,6 +158,17 @@ schedules from the Composer, which stays the approval step.
   does.
 
 ### 4. Serve the agent from the same origin
+
+**Done for the local stack.**
+- `assistant/` is a copy of this repo. README, "Inside FlowAI", has the command to copy it again.
+- In `docker-compose.yml` the service sits behind profiles, so a plain `docker compose up -d`
+  doesn't need a GPU:
+  - `assistant` (GPU): `docker compose --profile assistant up -d`;
+  - `assistant-cpu`: `--profile assistant-cpu`.
+- `frontend/vite.config.ts` has the proxy.
+
+**Still to do:** `deploy/docker-compose.yml` and `deploy/nginx.conf`. The settings below for them
+are tested, but production waits on [where the agent runs](#open-decisions).
 
 **Why.** On the same origin there is no CORS to configure, and the WebSocket rides the site's
 HTTPS.
@@ -318,10 +366,10 @@ Done in this repo and tested against the local stack:
   - Saving changes to a scheduled post makes it a draft again. FlowAI does this, and the agent
     then asks the user right away to approve the same time again, so nothing goes out
     unapproved.
+- **Sign-in:** in FlowAI's Assistant tab, with the person's token (change 1). On this repo's own
+  page, which has no FlowAI session, the agent signs in with `FLOWAI_EMAIL` / `FLOWAI_PASSWORD`
+  through Sanctum's cookie flow, with the dashboard's address as `Referer`.
 - **Stand-ins until FlowAI's changes exist:**
-  - Sign-in: the agent signs in with `FLOWAI_EMAIL` / `FLOWAI_PASSWORD` through Sanctum's cookie
-    flow, with the dashboard's address as `Referer`. Replace this with the token from change 1,
-    sent by the page as `{"type": "auth", "token"}`; `FlowAIClient` already takes a `token`.
   - Story bodies: a story's body is sent as its title, until change 7.
   - Slides are uploaded as plain uploads until change 5, and texts are flattened into the
     pictures until change 6.
@@ -344,10 +392,25 @@ post and asset the tests made was deleted afterwards.
 | A story draft with no caption | `422` (change 7). |
 | An X draft over 280 characters | `422`, even as a draft (see the agent's part). |
 | Picture and video models in FlowAI | None available: no Higgsfield or Gemini key is set. Until one is, FlowAI can't make pictures at all on this stack, which makes change 8 more useful. |
-| `POST /api/assistant/session` | `404`, as expected (change 1 isn't done yet). |
+| `POST /api/assistant/session` (2026-10-09) | `404`, as expected (change 1 wasn't done yet). |
 | The agent's FlowAI tools, end to end | Save, save again (same post, old slides deleted), no-change save, find, open (a scheduled post), gallery pictures into a draft, schedule, approve, change after scheduling, re-approval, decline, story with no caption, X caption over 280, queue with no slots: all as described above. |
 | The page in a browser (headless Chromium, DeepSeek V4.1 Flash) | "Make an Instagram post…" → draft on screen; click the headline, "make this gold" → only that text changed; Save → post in FlowAI; "schedule it for next Friday at 9" → approval card → Approve → post `scheduled`, `approved_at` set. |
 | The agent in Docker (both images), FlowAI at `host.docker.internal:8002` | A spoken request over the WebSocket: recognised, `find_posts`, a spoken reply. Behind nginx at `/assistant/` with the change 4 settings, the page loaded, the WebSocket connected, the drawn slide loaded from `/assistant/media/`, and Save made a FlowAI post. `/assistant` without the slash redirects to `/assistant/` and keeps the port. |
+
+Run on 2026-10-10 with changes 1 to 4 in place: the `assistant` service on the GPU, Vite, the demo
+user, headless Chromium in FlowAI's own page. Afterwards, the test post, its asset and the
+tokens were deleted.
+
+| What | Result |
+|---|---|
+| FlowAI's tests | 183 pass, with 5 new in `AssistantTest`. The token reads the user's own data only and saves drafts. Scheduling with it gets `422`, and a person's session can then schedule (`approved_by` is that person). Other routes get `403`, a token can't mint another, logout ends them, and unconfirmed users get none. |
+| Typed request in the tab ("Make an Instagram post for Fig & Cedar… first picture from our gallery") | `find_assets`, `use_assets`, `create_draft`: draft on screen in 11.4 s, with the gallery picture and two texts. |
+| Editing by hand | Text recoloured and moved, caption applied, Undo, Save (post in FlowAI as a draft). Then, without the model: an empty draft, two gallery pictures as slides, a text added and rewritten in place on the slide, slides reordered and one removed, Feed → Story → Feed, an X draft with a picture from the Media view. Each change is one render, under a second. |
+| Calendar drop | Draft dropped on Sunday 10:00: saved, approval asked, booked with the person's session, the post on the grid, and the sidebar's count updated. |
+| Voice through the page (Chrome's fake microphone playing a spoken WAV) | Heard "what do we have scheduled this week" (recognition 117 ms), `find_posts`, a spoken answer naming the post just booked. |
+| Other pages | The dock shows on the Calendar page while the mic is on. Coming back, the draft is still there. |
+| Phone width (390 px) | Stacks, no sideways scroll. |
+| Console | No errors, apart from FlowAI's usual `401 /api/user` before sign-in. |
 
 Found along the way, not needed for the agent:
 

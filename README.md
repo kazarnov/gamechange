@@ -54,8 +54,8 @@ through your speakers and interrupt itself.
 
 ## Docker
 
-The same app as an image, to run as a service (and later inside FlowAI's stack:
-`FLOWAI_INTEGRATION.md`, change 4). Settings come from `.env`, as above.
+The same app as an image, to run as a service. Settings come from `.env`, as above. FlowAI runs
+the same image as its `assistant` service; see [Inside FlowAI](#inside-flowai).
 
 ```bash
 docker compose up -d --build        # NVIDIA GPU: recognition and OmniVoice on the card
@@ -237,9 +237,8 @@ client's house style). Edits apply on the next turn, without a restart.
 
 ## The agent page and FlowAI
 
-`web/index.html` is the agent's own page, in FlowAI's dashboard style. It is the working
-reference for the page FlowAI will host ([FLOWAI_INTEGRATION.md](FLOWAI_INTEGRATION.md),
-change 3).
+`web/index.html` is the agent's own page, in FlowAI's dashboard style. FlowAI has its own version,
+the Assistant tab (see [Inside FlowAI](#inside-flowai)).
 - **Left:** the conversation, with the mic.
 - **Middle:** the current draft as it will look on Instagram or X: carousel arrows, story bars,
   X's picture grid, a caption past the limit highlighted, and the platform check.
@@ -261,11 +260,36 @@ user's Instagram and X accounts and each account's voice (profile and memory), a
 | **Undo** / **Save** / a post in the list | done directly, in a fraction of a second, without the assistant; it is told what happened |
 
 Nothing is scheduled without a person's click. Changing a scheduled post makes it a draft
-again, and the approval card comes back for the same time. Until FlowAI issues the assistant a
-token, it signs in with `FLOWAI_EMAIL` and `FLOWAI_PASSWORD`. Use the local stack's demo user
-(`demo@flowai.test` / `password`); `FLOWAI_DASHBOARD_URL` must be one of FlowAI's
-`SANCTUM_STATEFUL_DOMAINS`. What FlowAI itself needs is in
-[FLOWAI_INTEGRATION.md](FLOWAI_INTEGRATION.md).
+again, and the approval card comes back for the same time. On this page, the assistant signs in
+to FlowAI as `FLOWAI_EMAIL` with `FLOWAI_PASSWORD`. Use the local stack's demo user
+(`demo@flowai.test` / `password`). `FLOWAI_DASHBOARD_URL` must be one of FlowAI's
+`SANCTUM_STATEFUL_DOMAINS`.
+
+### Inside FlowAI
+
+FlowAI (`content-generator/`) has a copy of this repo in `assistant/`. It runs as its `assistant`
+service: `docker compose --profile assistant up -d`, or `--profile assistant-cpu` without a GPU.
+Its page is the dashboard's **Assistant** tab (`frontend/src/dashboard/assistant/`), served
+through the Vite proxy at `/assistant/`. Beyond this page, it adds:
+- **Sign-in as the person who opened it.** The tab asks FlowAI for a token
+  (`POST /api/assistant/session`) and sends it in its `hello`. That token can save drafts but
+  not schedule, and reaches only the routes the tools use. **Approve** books the post with the
+  person's own session.
+- **Editing by hand without the model:** captions, titles, placement, text words and styles,
+  slide order, removing slides, adding pictures. These are the `action` messages listed at the
+  top of `backend/session.py`. The assistant is told about each change.
+- **A calendar:** drop a draft on a slot to book it there.
+- **A conversation that survives page changes:** it stays open from page to page, with a dock to
+  come back.
+
+After changing the agent here, copy it over and rebuild:
+
+```bash
+rsync -a --delete --exclude __pycache__ --exclude comfyui/outputs --exclude comfyui/pod.env \
+  backend web skills fonts comfyui requirements.txt Dockerfile .dockerignore .env.example .gitignore README.md \
+  content-generator/assistant/
+cd content-generator && docker compose --profile assistant up -d --build assistant
+```
 
 ## Adding plain tools
 
