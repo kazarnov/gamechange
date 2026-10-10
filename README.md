@@ -64,8 +64,8 @@ docker compose logs -f agent        # wait for "Ready"
 
 The agent page is on http://localhost:8000 (`AGENT_PORT` to change). The first start downloads
 the models (5.8 GB) into the `models` volume, which takes a few minutes. After that, a start
-takes seconds. Drawn and attached files are kept in the `media` volume, and OmniVoice's
-designed voice in `voices`.
+takes seconds. Drawn and attached files are kept in the `media` volume, conversations in `data`,
+and OmniVoice's designed voice in `voices`.
 
 - **FlowAI from the container.** Inside it, `localhost` is the container itself. For the local
   FlowAI stack, set `FLOWAI_URL=http://host.docker.internal:8002`.
@@ -255,6 +255,7 @@ user's Instagram and X accounts and each account's voice (profile and memory), a
 | "What do we have scheduled?" / "Find the linen post" | `find_posts` |
 | "Open it" / click a post in the list | `open_post`: the post becomes a draft here; saving updates it |
 | "Use the autumn photo from the gallery" | `find_assets`, `use_assets`: gallery pictures get numbers to use in drafts |
+| "Open the autumn launch campaign" | `find_campaigns`, `open_campaign`: each of its posts becomes a draft, linked to the campaign (see [Campaigns](#campaigns)) |
 | "Schedule it for Friday at 9" | `schedule_post`: an approval card appears; only **Approve** books it |
 | click a text on the picture | that text is selected: "make this gold" means it |
 | **Undo** / **Save** / a post in the list | done directly, in a fraction of a second, without the assistant; it is told what happened |
@@ -264,6 +265,47 @@ again, and the approval card comes back for the same time. On this page, the ass
 to FlowAI as `FLOWAI_EMAIL` with `FLOWAI_PASSWORD`. Use the local stack's demo user
 (`demo@flowai.test` / `password`). `FLOWAI_DASHBOARD_URL` must be one of FlowAI's
 `SANCTUM_STATEFUL_DOMAINS`.
+
+### Conversations
+
+Every conversation is kept, so it can be listed, switched to and picked up again later, or after
+a restart. Each one has its own history, numbered pictures, drafts (with their undo steps),
+saved posts, campaign links and approvals. `backend/conversations.py` writes it to
+`DATA_DIR/conversations/<owner>/<id>.json`, with an `index.json` per owner for the list. The
+owner is the FlowAI user (`local` when `FLOWAI_URL` is empty). While FlowAI can't say who the
+user is, nothing is kept, so no one's conversations end up in a shared folder.
+
+- **Reconnecting.** The connection shows one conversation at a time, and the conversation
+  outlives it. A page that reconnects with the conversation's id in its `hello` gets it back
+  whole, in one `conversation` event.
+- **Switching.** What the assistant is saying stops, but what it's making doesn't: a picture still
+  being made lands in its draft in the conversation it was asked for. That conversation stays in
+  memory until the picture is in and saved.
+- **Messages.** `new`, `open`, `rename`, `delete` and `conversations` (listed at the top of
+  `backend/session.py`). This repo's page starts a new conversation on each load; FlowAI's tab
+  has the list.
+- **Deleting** removes its file, its pictures and every drawn version of its slides. Drawn files
+  are named after the conversation for that reason.
+
+### Campaigns
+
+`open_campaign` (or **Open a campaign** in FlowAI's tab) brings a FlowAI campaign into the
+conversation. Its brief and big idea go into the assistant's instructions, and each of its posts
+becomes a draft, linked to the campaign rather than to a single FlowAI post:
+- one draft for each account's version of a post (FlowAI's *variants*), with that version's
+  caption, placement and pictures;
+- before the versions exist (while the plan is still being made), one draft per post, showing
+  the post itself.
+
+Saving a linked draft changes the campaign through FlowAI's own campaign endpoints:
+- **A version:** its caption and placement. Its slides are uploaded only if they changed, and
+  become that account's own pictures.
+- **A post without versions:** its title and caption, and its pictures.
+
+FlowAI then sends a changed version back to review (gate 6B). The assistant asks on screen for
+the person's approval, and approving it updates the times already booked for that version too.
+A version that is approved can get another time with `schedule_post`, also approved on screen.
+The assistant's token can't approve anything itself.
 
 ### Inside FlowAI
 
@@ -281,6 +323,10 @@ through the Vite proxy at `/assistant/`. Beyond this page, it adds:
 - **A calendar:** drop a draft on a slot to book it there.
 - **A conversation that survives page changes:** it stays open from page to page, with a dock to
   come back.
+- **Conversations and campaigns:** a list over the conversation panel (new, open, rename,
+  delete, search), **Open a campaign**, and an **Open in the assistant** button on each campaign
+  in FlowAI's Campaigns page. A draft from a campaign shows which post and account it is, where
+  it stands at gate 6B, and its booked times. The last conversation opens again after a reload.
 
 After changing the agent here, copy it over and rebuild:
 
@@ -326,12 +372,14 @@ backend/
   media.py     per-conversation generation jobs, numbered media, uploads, adding workflows
   studio.py    post drafts: slides, texts drawn with Pillow, versions and undo
   platforms.py Instagram and X specs and the pre-export check (mirrors FlowAI's)
-  flowai.py    FlowAI: accounts and voice, saving, finding, opening and scheduling posts
+  flowai.py    FlowAI: accounts and voice, saving, finding, opening and scheduling posts, campaigns
+  conversations.py  conversations kept on disk: list, reopen, switch, delete
 skills/        browser agent skills (markdown)
   content/     content skills: how to make each kind of post
 fonts/         fonts for text on pictures (Geist and Instrument Serif, OFL)
 comfyui/       RunPod kit (manager.py, setup scripts, workflow bundles) + descriptions.yaml
 media/         generated and attached files (served at media/, next to the page)
+data/          conversations (not served)
 web/           the agent page (index.html, agent.js), the test console (console.html, app.js),
                the protocol client both use (voice.js), mic-worklet.js
 ```

@@ -12,6 +12,7 @@ from .asr import ASREngine, resample
 from .browser import Browser
 from .comfyui import ComfyClient, ComfyError
 from .config import ROOT, settings
+from .conversations import ConversationStore
 from .llm import LLM
 from .session import Models, VoiceSession
 from .tts import SAMPLE_RATE as TTS_RATE
@@ -81,6 +82,9 @@ async def lifespan(app: FastAPI):
         app.state.comfy_check = asyncio.create_task(check_comfy(comfy))  # don't hold up startup
     else:
         log.info("COMFYUI_URL is not set: picture/video generation is off")
+    app.state.models.conversations = ConversationStore(
+        ROOT / settings.data_dir / "conversations", app.state.models.comfy, MEDIA_DIR, ROOT / settings.fonts_dir,
+        settings.comfyui_timeout_minutes * 60)
     log.info("Ready")
     yield
     if app.state.models.browser:

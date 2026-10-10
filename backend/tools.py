@@ -376,13 +376,14 @@ async def show_draft(session, draft: int | None = None):
 
 # --- FlowAI: saving, finding and scheduling posts (backend/flowai.py) --------------
 
-FLOWAI_TOOLS = {"save_draft", "find_posts", "open_post", "find_assets", "use_assets", "schedule_post"}
+FLOWAI_TOOLS = {"save_draft", "find_posts", "open_post", "find_assets", "use_assets", "schedule_post",
+                "find_campaigns", "open_campaign"}
 
 
 @tool(
     "save_draft",
     "Save a draft to FlowAI as a post with status draft, or save its latest changes to the same post. The team "
-    "sees it in FlowAI's Composer and calendar.",
+    "sees it in FlowAI's Composer and calendar. A draft opened from a campaign is saved into that campaign.",
     {
         "type": "object",
         "properties": {
@@ -423,6 +424,32 @@ async def find_posts(session, query: str | None = None, status: str | None = Non
 )
 async def open_post(post: int, session):
     return await session.flowai.open_post(post)
+
+
+@tool(
+    "find_campaigns",
+    "Find the user's FlowAI campaigns, newest first: name, stage and how many posts each has.",
+    {
+        "type": "object",
+        "properties": {"query": {"type": "string", "description": "Words in the campaign's name"}},
+    },
+)
+async def find_campaigns(session, query: str | None = None):
+    return await session.flowai.find_campaigns(query)
+
+
+@tool(
+    "open_campaign",
+    "Bring a FlowAI campaign's posts into this conversation as drafts, one per account version, to show or "
+    "change them. Saving one changes that post in the campaign; a changed version waits for the user's approval.",
+    {
+        "type": "object",
+        "properties": {"campaign": {"type": "integer", "description": "The campaign's number from find_campaigns"}},
+        "required": ["campaign"],
+    },
+)
+async def open_campaign(campaign: int, session):
+    return await session.flowai.open_campaign(campaign)
 
 
 @tool(

@@ -17,7 +17,7 @@ import logging
 import re
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -82,6 +82,17 @@ def _words(text) -> str:
     if len(text) > MAX_TEXT:
         raise StudioError(f"that is {len(text)} characters; text on a picture should be short (max {MAX_TEXT})")
     return text
+
+
+def _state_out(state: dict) -> dict:
+    """A draft's state (Draft.state) as JSON."""
+    return {**state, "slides": [{"media": s.media, "texts": [asdict(t) for t in s.texts]} for s in state["slides"]]}
+
+
+def _state_in(data: dict) -> dict:
+    state = {k: data[k] for k in Draft.EDITABLE if k in data}
+    state["slides"] = [Slide(s.get("media"), [Text(**t) for t in s.get("texts", [])]) for s in data.get("slides", [])]
+    return state
 
 
 @dataclass
@@ -158,9 +169,10 @@ class Draft:
 
 class StudioSession:
     def __init__(self, media: "MediaSession | None", media_dir: Path, fonts_dir: Path,
-                 send: Callable[..., Awaitable[None]]):
+                 send: Callable[..., Awaitable[None]], prefix: str = ""):
         self.media = media  # None when picture generation is off
         self.dir = media_dir
+        self.prefix = prefix  # of the drawn files' names: the conversation's, to delete them with it
         self.fonts_dir = fonts_dir
         self.send = send  # to the web UI; must not raise
         self.drafts: dict[int, Draft] = {}
@@ -484,6 +496,28 @@ class StudioSession:
         await self.send(**self._event(d))
         return self.summary(d)
 
+    # --- kept with the conversation (backend/conversations.py) -------------------------
+
+    def dump(self) -> dict:
+        return {"count": self.count, "drafts": [
+            {"id": d.id, "version": d.version, **_state_out(d.state()),
+             "history": [_state_out(h) for h in d.history],
+             "files": [{"file": path.name, **asdict(f)} for path, f in d.files],
+             "boxes": d.boxes, "check": d.check}
+            for d in self.drafts.values()]}
+
+    async def restore(self, data: dict):
+        self.count = data.get("count", 0)
+        for raw in data.get("drafts", []):
+            d = Draft(raw["id"], raw["platform"], raw["placement"])
+            d.restore(_state_in(raw))
+            d.version, d.check, d.boxes = raw.get("version", 0), raw.get("check", {}), raw.get("boxes", [])
+            d.history = [_state_in(h) for h in raw.get("history", [])]
+            d.files = [(self.dir / Path(f.pop("file")).name, File(**f)) for f in map(dict, raw.get("files", []))]
+            self.drafts[d.id] = d
+            if not all(path.is_file() for path, _ in d.files):  # MEDIA_DIR lost them: draw them again
+                await self._apply(d, lambda d: None, record=False)
+
     # --- output ---------------------------------------------------------------------
 
     def summary(self, d: Draft) -> dict:
@@ -503,6 +537,10 @@ class StudioSession:
                 "caption": d.caption,
                 "caption_length": f"{len(d.caption)} of {s['caption']}" if s["caption"] else "this placement has no caption",
                 "slides": slides or "none (text only)", "problems": problems or "none"}
+
+    def events(self) -> list[dict]:
+        """Every draft, as the web UI shows it."""
+        return [self._event(d) for d in self.drafts.values()]
 
     def _event(self, d: Draft) -> dict:
         """The draft as the web UI shows it."""
@@ -546,7 +584,7 @@ class StudioSession:
                                "box": [round(x / size[0], 4), round(y / size[1], 4),
                                        round(w / size[0], 4), round(h / size[1], 4)],
                                **{k: getattr(t, k) for k in LOOK}}
-            path = self.dir / f"draft{d.id}-v{version}-{i}-{uuid.uuid4().hex[:6]}.jpg"
+            path = self.dir / f"{self.prefix}draft{d.id}-v{version}-{i}-{uuid.uuid4().hex[:6]}.jpg"
             img.save(path, "JPEG", quality=90, optimize=True)
             out.append((path, File("image", size[0], size[1], path.stat().st_size)))
             layout.append([boxes[t.id] for t in slide.texts])

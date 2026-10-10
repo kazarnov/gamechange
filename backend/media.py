@@ -467,6 +467,39 @@ class MediaSession:
             note = f"Adding the workflow {job.workflow} failed: {exc}. Tell the user briefly."
         self.notify(note)
 
+    # --- kept with the conversation (backend/conversations.py) -------------------------
+
+    @property
+    def busy(self) -> bool:
+        return any(j.status == "running" for j in self.jobs.values())
+
+    def dump(self) -> dict:
+        """The numbered files, to reopen the conversation later. Jobs aren't kept: a restart ends them."""
+        return {"count": self.item_count, "jobs": self.job_count,
+                "items": [{"id": i.id, "kind": i.kind, "name": i.name, "source": i.source,
+                           "file": i.path.name if i.path else None, "workflow": i.workflow, "prompt": i.prompt,
+                           **({"data": i.data} if i.data is not None else {})}
+                          for i in self.items.values()]}
+
+    def restore(self, data: dict):
+        self.item_count, self.job_count = data.get("count", 0), data.get("jobs", 0)
+        for i in data.get("items", []):
+            name = i.get("file")
+            path = self.dir / name if name and Path(name).name == name else None
+            if path and not path.is_file():
+                continue  # gone from MEDIA_DIR: its number stays taken
+            self.items[i["id"]] = MediaItem(i["id"], i["kind"], i["name"], i["source"], path,
+                                            i.get("workflow", ""), i.get("prompt", ""), i.get("data"))
+
+    def running(self) -> list[dict]:
+        """Generations still going, as the page shows them when the conversation is reopened."""
+        def makes(name: str) -> str:
+            wf = self.comfy.workflows.get(name) if self.comfy else None
+            return wf.output if wf else "image"
+        return [{"type": "media_job", "id": j.id, "kind": "generate", "status": "started", "workflow": j.workflow,
+                 "prompt": j.prompt, "makes": makes(j.workflow), "seconds": round(time.monotonic() - j.started)}
+                for j in self.jobs.values() if j.kind == "generate" and j.status == "running"]
+
     # --- status / cancel ------------------------------------------------------------
 
     def status(self) -> dict:

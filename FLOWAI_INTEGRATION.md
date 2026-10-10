@@ -11,6 +11,9 @@ document is the plan for joining the two.
 - the Assistant tab;
 - the `assistant` service and the Vite proxy.
 
+The tab also has kept conversations and campaign import, with the small FlowAI changes they
+needed (see [Campaigns in the assistant](#campaigns-in-the-assistant)).
+
 Still to do:
 - production: the deploy compose service and the nginx blocks in change 4, waiting on
   [where the agent runs](#open-decisions);
@@ -156,6 +159,36 @@ Beyond the plan below:
 - **Navigation.** Add an entry in `frontend/src/dashboard/nav.ts` (under Create) and the route in
   `Dashboard.tsx`. Saved posts link to `/dashboard/create?post={id}`, as the page here already
   does.
+
+### Campaigns in the assistant
+
+**Done.** A campaign opens in the assistant as drafts, one per account version (`ItemVariant`),
+or one per item before versions exist. Saving a draft changes the campaign. Changes in
+`content-generator/`:
+- **`LimitAssistantToken`.** The token may reach these campaign routes:
+  - read: `GET` on `campaigns`, `campaigns/{campaign}` and `campaigns/{campaign}/items`;
+  - change: `PATCH` on `campaigns/{campaign}/items/{item}` and
+    `campaigns/{campaign}/variants/{variant}`, and `PUT` on
+    `campaigns/{campaign}/items/{item}/media`.
+
+  Approving the plan or a version, booking times, scheduling and deleting stay the person's.
+- **`CampaignReviewController::update` and `Pipeline::edit`** take an optional `asset_ids`: the
+  version's own media for that account, which must be the user's own assets. `ItemVariant`
+  already had the column, but nothing set it.
+- **`CampaignItemResource`** gives each version its own `assets`, or `null` when it shares the
+  item's.
+- **`Pipeline::approve`** gives the version's booked posts that haven't gone out (draft or
+  scheduled) the approved content: title, caption, placement, media and approval. Before this,
+  editing an approved and booked version in the Review tab, then approving it again, left the
+  old text in the calendar.
+- **`phpunit.xml`** blanks `VOICESTUDIO_URL` and `VOICESTUDIO_KEY`, like `SOUND_URL`. A dev box
+  with VoiceStudio set in `.env` failed `SoundTest`.
+- **The Campaigns page** has an **Open in the assistant** button
+  (`/dashboard/assistant?campaign={id}`).
+- **Tests:** two new in `AssistantTest`. One checks reading campaigns, a version's own media,
+  that the token can't approve, and that approving updates the booked post. The other checks
+  that before versions exist the token edits the item, and can't approve the plan, schedule or
+  delete.
 
 ### 4. Serve the agent from the same origin
 
@@ -411,6 +444,20 @@ tokens were deleted.
 | Other pages | The dock shows on the Calendar page while the mic is on. Coming back, the draft is still there. |
 | Phone width (390 px) | Stacks, no sideways scroll. |
 | Console | No errors, apart from FlowAI's usual `401 /api/user` before sign-in. |
+
+Run on 2026-10-10, after conversations and campaigns (same stack, the new pod's ComfyUI and
+VoiceStudio):
+
+| What | Result |
+|---|---|
+| FlowAI's tests | 185 pass, with 2 new in `AssistantTest`. |
+| Conversations in the agent (`backend/conversations.py`, in the image) | Draft with a picture and a restyled text saved, dropped from memory, reopened: same version, undo still works, links and approvals back. A slide file deleted from `media/` is drawn again on reopening. Another user's list is empty, a `../` id is refused, rename and delete work, and delete leaves no files behind. |
+| Campaign over the WebSocket (a sample campaign: 2 posts, 3 versions, one approved and booked) | `new` with the campaign: 3 drafts, each linked, with status and booked time. Caption changed and a text added, then saved: the version is back at gate 6B, the slide uploaded as its own media, and an approval asked. Booking a time on an unapproved version is refused. Approved by the person: the booked post took the new caption and slide. Reopened after disconnecting: drafts, links and the approval all back. A time booked for the approved version; a second conversation, renamed and deleted. |
+| The tab in a browser | The list showed the conversation, which reopened whole; a waiting approval was declined. **Open a campaign** made a new conversation (campaign intro, linked drafts, banner). A caption edited by hand was saved to the campaign; **Approve** gave `Approved`, with no upload, because only the caption changed. Asked "which of these posts still need my approval?", the model named the one still waiting and the booked time. After a reload, the same conversation came back with its drafts and reply. **Open in the assistant** on the Campaigns page opened it too. At 390 px the list fits, with no sideways scroll. |
+| Console | Only FlowAI's usual `401 /api/user` before sign-in. |
+
+The test conversations, the test post, the uploaded slide and the test token were deleted
+afterwards. The demo user keeps a sample campaign, recreated as new, for trying this out.
 
 Found along the way, not needed for the agent:
 

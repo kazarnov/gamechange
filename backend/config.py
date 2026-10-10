@@ -69,6 +69,7 @@ class Settings(BaseSettings):
     comfyui_descriptions: str = "comfyui/descriptions.yaml"  # what each workflow is for
     comfyui_timeout_minutes: int = 30  # give up waiting for one generation after this
     media_dir: str = "media"  # generated and attached files, served at /media
+    data_dir: str = "data"  # conversations, so they can be reopened (backend/conversations.py); not served
 
     # Content studio: post drafts for Instagram and X (backend/studio.py)
     content_skills_dir: str = "skills/content"  # how to make each kind of post

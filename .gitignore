@@ -5,6 +5,7 @@ __pycache__/
 key.txt
 browser-profile/
 media/
+data/
 comfyui/pod.env
 comfyui/outputs/
 content-generator/

@@ -10,11 +10,17 @@ Wire protocol
                                                attach an image/video/audio file
             {"type": "upload", "name": "x.json", "workflow": {...}}
                                                attach a ComfyUI workflow file
-            {"type": "reset"}                  clear conversation history
-            {"type": "hello", "timezone": "Europe/Paris", "token": "..."}
+            {"type": "reset"}                  start a new conversation (the old one is kept)
+            {"type": "hello", "timezone": "Europe/Paris", "token": "...", "conversation": "..."}
                                                the user's time zone, for scheduling; token (optional):
                                                the page's FlowAI sign-in (POST /api/assistant/session),
-                                               so the assistant acts as that user
+                                               so the assistant acts as that user; conversation
+                                               (optional): the one to pick up again
+            {"type": "conversations"}          the list of the user's conversations
+            {"type": "new", "campaign": 3}     a new conversation; with campaign, that FlowAI campaign's
+                                               posts in it as drafts
+            {"type": "open" | "delete", "id": "..."}
+            {"type": "rename", "id": "...", "title": "..."}
             {"type": "focus", "draft": 1, "slide": 1, "text": 2}
                                                what the user selected on screen ("this", "it");
                                                {"type": "focus"} clears it
@@ -34,9 +40,10 @@ Wire protocol
                                                FlowAI gallery files into the conversation (and the draft)
               schedule {"draft": 1, "when": "2026-10-16T09:00:00Z"}
                                                asks for approval, like schedule_post
-            {"type": "approve" | "decline", "id": 3}
-                                               the user's answer to an approval (scheduling); with
-                                               "done": true the page booked the post itself
+              open_campaign {"campaign": 3}    a FlowAI campaign's posts into this conversation
+            {"type": "approve" | "decline", "id": 3, "conversation": "..."}
+                                               the user's answer to an approval (scheduling, a campaign
+                                               version); with "done": true the page did it itself
   server -> client
     binary: 4-byte little-endian turn id + PCM16 mono 24 kHz assistant speech
     json:   ready | vad | transcript | assistant_delta | assistant_done |
@@ -48,7 +55,15 @@ Wire protocol
                    and platform check) |
             flowai (the signed-in user and their accounts) | posts (the latest FlowAI posts) |
             saved (a draft's FlowAI post: id, saved version, status, link) |
-            approval (something the user must approve on screen, and its outcome)
+            linked (a draft that is a FlowAI campaign's post: campaign, item, version, status, times) |
+            approval (something the user must approve on screen, and its outcome) |
+            conversation (the conversation now on screen, whole: history, media, running jobs,
+                          drafts, saved, linked, approvals; the page starts over from it) |
+            about (its name or campaign changed) |
+            conversations (the user's conversations, newest first, and which one is on screen)
+
+Conversations are kept (backend/conversations.py): this connection shows one at a time, and a
+conversation outlives the connection, so a reconnect picks it up again.
 """
 
 import asyncio
@@ -68,6 +83,7 @@ from .browser import Browser
 from .browser_agent import BrowserAgent
 from .comfyui import ComfyClient, ComfyError
 from .config import ROOT, settings
+from .conversations import Conversation, ConversationStore
 from .flowai import FlowAIClient, FlowAISession
 from .llm import LLM
 from .media import MediaSession
@@ -90,6 +106,7 @@ class Models:
     browser: Browser | None = None
     browser_llm: LLM | None = None
     comfy: ComfyClient | None = None
+    conversations: ConversationStore | None = None  # set once comfy is
 
 
 @dataclass
@@ -109,14 +126,14 @@ class VoiceSession:
         self.loop = asyncio.get_running_loop()
         self.vad = TurnDetector(settings.vad_threshold, settings.vad_min_silence_ms,
                                 settings.vad_min_speech_ms, settings.vad_preroll_ms)
-        self.media = self.new_media()
-        self.studio = self.new_studio()
+        self.store = models.conversations
+        # Kept once FlowAI says whose it is; without FlowAI, they're all this machine's
+        self.conv = self.store.new(None if settings.flowai_url else "local")
+        self.conv.sessions.add(self)
         self.flowai = self.new_flowai()
         self.flowai_loading: asyncio.Task | None = None
-        self.focus: dict = {}  # what the user selected on screen
-        self.focus_told: dict = {}  # the selection the LLM was last told about
+        self.switching = asyncio.Lock()  # one conversation change at a time
         self.skills_inline = False  # set by system_prompt()
-        self.messages: list = [{"role": "system", "content": self.system_prompt()}]
         self.send_lock = asyncio.Lock()
         self.turn = 0
         self.response: asyncio.Task | None = None
@@ -124,29 +141,43 @@ class VoiceSession:
         self.stream: StreamingTranscription | None = None
         self.utterance: list[np.ndarray] = []
         self.background: set[asyncio.Task] = set()
+        self.actions: set[asyncio.Task] = set()  # buttons on the page being done; a switch waits for them
         self.user_speaking = False
         self.job: BrowserJob | None = None
         self.job_count = 0
-        self.notes: list[str] = []  # events (task results, uploads) the LLM hasn't seen yet
-        self.announce = False  # a note needs a spoken reply even if the user says nothing
 
-    def new_media(self) -> MediaSession:
-        """Numbered pictures and files; generating them needs the ComfyUI pod (self.m.comfy)."""
-        return MediaSession(self.m.comfy, ROOT / settings.media_dir, settings.comfyui_timeout_minutes * 60,
-                            self.try_send, self.add_note, self.remember)
+    # The conversation on screen: its numbered pictures and files (generating them needs the ComfyUI
+    # pod, self.m.comfy) and its drafts. Tools reach them as session.media and session.studio.
+    @property
+    def media(self) -> MediaSession:
+        return self.conv.media
 
-    def new_studio(self) -> StudioSession:
-        return StudioSession(self.media, ROOT / settings.media_dir, ROOT / settings.fonts_dir, self.try_send)
+    @property
+    def studio(self) -> StudioSession:
+        return self.conv.studio
+
+    @property
+    def owner(self) -> str | None:
+        """Whose conversations this connection lists and keeps; None while FlowAI hasn't said."""
+        return self.flowai.owner if self.flowai else "local"
 
     def new_flowai(self) -> FlowAISession | None:
         if not settings.flowai_url:
             return None
         client = FlowAIClient(settings.flowai_url, settings.flowai_dashboard_url,
                               settings.flowai_email, settings.flowai_password)
-        return FlowAISession(client, self.studio, self.media, self.try_send, self.add_note, self.remember)
+        return FlowAISession(client, self.conv, self.try_send)
 
     def remember(self, text: str):
         self.add_note(text, announce=False)
+
+    def spawn(self, coro, group: set[asyncio.Task] | None = None) -> asyncio.Task:
+        """Work off the receive loop, so mic audio keeps flowing meanwhile."""
+        group = self.background if group is None else group
+        task = asyncio.create_task(coro)
+        group.add(task)
+        task.add_done_callback(group.discard)
+        return task
 
     def system_prompt(self) -> str:
         prompt = settings.system_prompt
@@ -256,7 +287,7 @@ class VoiceSession:
         finally:
             await self.interrupt(notify=False)
             await self.cancel_browser_task()
-            await self.media.close()
+            await self.leave(self.conv)
             if self.flowai:
                 await self.flowai.client.close()
             if self.stream:
@@ -280,25 +311,18 @@ class VoiceSession:
                     if msg.get("token") and not self.flowai_loading:
                         await self.flowai.use_token(str(msg["token"]))
                     self.load_flowai()
+                self.spawn(self.on_conversation({"type": "hello", "id": msg.get("conversation")}))
             case "focus":
-                self.focus = {k: msg[k] for k in ("draft", "slide", "text") if msg.get(k) not in (None, "")}
+                self.conv.focus = {k: msg[k] for k in ("draft", "slide", "text") if msg.get(k) not in (None, "")}
             case "action" | "approve" | "decline":
                 # Uploads to FlowAI take a moment: keep reading mic audio meanwhile
-                task = asyncio.create_task(self.on_action(msg))
-                self.background.add(task)
-                task.add_done_callback(self.background.discard)
+                self.spawn(self.on_action(msg), self.actions)
+            case "conversations":
+                self.spawn(self.send_conversations())
+            case "new" | "open" | "rename" | "delete":
+                self.spawn(self.on_conversation(msg))
             case "reset":
-                await self.interrupt()
-                await self.cancel_browser_task()
-                await self.media.close()
-                self.media = self.new_media()
-                self.studio = self.new_studio()
-                if self.flowai:
-                    self.flowai.reset(self.studio, self.media)
-                self.focus, self.focus_told = {}, {}
-                self.notes.clear()
-                self.announce = False
-                self.messages = [{"role": "system", "content": self.system_prompt()}]
+                self.spawn(self.on_conversation({"type": "new"}))
 
     async def on_upload(self, msg: dict):
         try:
@@ -309,6 +333,8 @@ class VoiceSession:
     async def on_action(self, msg: dict):
         """A button on the page: done directly, then the LLM is told so the conversation stays in step."""
         kind, name = msg["type"], msg.get("name")
+        if msg.get("conversation") not in (None, "", self.conv.id):
+            return  # pressed in a conversation that's no longer on screen
         if kind in ("approve", "decline"):
             if self.flowai:
                 await self.flowai.decide(msg.get("id"), approve=kind == "approve", done=bool(msg.get("done")))
@@ -363,6 +389,15 @@ class VoiceSession:
         elif name == "schedule" and self.flowai:
             result = await self.flowai.schedule(draft, msg.get("when"))
             done = f"asked to schedule a draft from the calendar: {result.get('asks')}"
+        elif name == "open_campaign" and self.flowai:
+            if self.flowai_loading:
+                await self.flowai_loading  # its accounts say which platform each post is for
+            result = await self.flowai.open_campaign(msg.get("campaign"))
+            opened = result.get("opened")
+            done = f"opened the FlowAI campaign {result.get('campaign')} here: " + \
+                   ("; ".join(opened) if isinstance(opened, list) else "no new drafts") + \
+                   (f" (already open: {result['already_open']})" if result.get("already_open") else "") + \
+                   (f". Some couldn't be opened: {'; '.join(result['failed'])}" if result.get("failed") else "")
         else:
             return
         if "error" in result:
@@ -370,20 +405,93 @@ class VoiceSession:
             return
         self.remember(f"On screen, the user {done}.")
 
+    # --- conversations --------------------------------------------------------------
+
+    async def on_conversation(self, msg: dict):
+        """hello (once FlowAI said who the user is), new, open, rename or delete; then the list again."""
+        async with self.switching:
+            if self.flowai_loading:
+                await self.flowai_loading  # whose conversations these are (it never raises)
+            kind, owner, cid = msg["type"], self.owner, str(msg.get("id") or "")
+            if owner:
+                self.store.adopt(self.conv, owner)
+            if kind == "hello":
+                found = await self.store.open(owner, cid) if owner and cid and cid != self.conv.id else None
+                if found and self.conv.empty:
+                    await self.switch(found)
+                else:
+                    await self.send_conversation()
+            elif kind == "new":
+                await self.switch(self.store.new(owner))
+                if msg.get("campaign") not in (None, ""):
+                    await self.on_action({"type": "action", "name": "open_campaign", "campaign": msg["campaign"]})
+            elif kind == "open":
+                found = await self.store.open(owner, cid) if owner else None
+                if not found:
+                    await self.try_send(type="error", message="That conversation can't be found; it may have been "
+                                                              "deleted.")
+                elif found is not self.conv:
+                    await self.switch(found)
+            elif kind == "rename" and owner:
+                await self.store.rename(owner, cid, str(msg.get("title") or ""))
+            elif kind == "delete" and owner:
+                if cid == self.conv.id:
+                    await self.switch(self.store.new(owner))
+                await self.store.delete(owner, cid)
+            await self.send_conversations()
+
+    async def switch(self, conv: Conversation):
+        """Shows another conversation. What is being said stops; what is being made carries on in its own."""
+        await self.interrupt()
+        if self.actions:
+            await asyncio.wait(set(self.actions))  # a save in flight finishes in the conversation it began in
+        old, self.conv = self.conv, conv
+        conv.sessions.add(self)
+        conv.focus, conv.focus_told = {}, {}  # the page starts with nothing selected
+        conv.announce = False  # what happened meanwhile is on screen: no need to say it right away
+        if self.flowai:
+            self.flowai.attach(conv)
+        await self.leave(old)
+        await self.send_conversation()
+
+    async def leave(self, conv: Conversation):
+        """This connection no longer shows it. A kept one is saved, and its generations go on (their
+        pictures land in its drafts); others stop theirs, since nobody would see them."""
+        conv.sessions.discard(self)
+        if conv.owner:
+            await conv.flush()
+            self.store.release(conv)
+        elif not conv.sessions:
+            await conv.media.close()
+
+    async def send_conversation(self):
+        """The conversation on screen, whole: the page starts over from it."""
+        c = self.conv
+        await self.try_send(
+            **{**c.about(), "type": "conversation"},
+            history=c.history(), media=[i.event() for i in c.media.items.values() if i.kind in ("image", "video")],
+            jobs=c.media.running(), drafts=c.studio.events(), **(self.flowai.snapshot() if self.flowai else {}))
+
+    async def send_conversations(self):
+        owner = self.owner
+        items = await self.store.list(owner) if owner else []
+        await self.try_send(type="conversations", items=items, current=self.conv.id, kept=bool(owner))
+
     def focus_note(self) -> str | None:
         """What the user selected on screen, for "this" and "it", when it changed since the LLM was told."""
-        if self.focus == self.focus_told:
+        conv = self.conv
+        if conv.focus == conv.focus_told:
             return None
-        self.focus_told = dict(self.focus)
-        d = self.studio.drafts.get(self.focus.get("draft"))
+        conv.focus_told = dict(conv.focus)
+        d = self.studio.drafts.get(conv.focus.get("draft"))
         if not d:
             return None
         what = f"draft {d.id}"
-        if self.focus.get("slide"):
-            what = f"slide {self.focus['slide']} of {what}"
-        if self.focus.get("text"):
+        if conv.focus.get("slide"):
+            what = f"slide {conv.focus['slide']} of {what}"
+        if conv.focus.get("text"):
             try:
-                _, t = d.find_text(self.focus["text"])
+                _, t = d.find_text(conv.focus["text"])
                 what = f"text {t.id} (“{t.text}”) on {what}"
             except Exception:
                 pass
@@ -475,15 +583,18 @@ class VoiceSession:
         self.load_flowai()
         if self.flowai_loading and not self.flowai_loading.done():
             await asyncio.wait({self.flowai_loading}, timeout=5)  # the accounts go in the prompt
-        self.messages[0]["content"] = self.system_prompt()
+        conv = self.conv  # a switch interrupts this reply first, so it stays the same throughout
+        system = {"role": "system", "content": self.system_prompt()}
         if user_text and (focus := self.focus_note()):
-            self.notes.append(focus)
-        for note in self.notes:
-            self.messages.append({"role": "system", "content": note})
-        self.notes.clear()
-        self.announce = False
+            conv.notes.append(focus)
+        for note in conv.notes:
+            conv.messages.append({"role": "system", "content": note})
+        conv.notes.clear()
+        conv.announce = False
         if user_text:
-            self.messages.append({"role": "user", "content": user_text})
+            conv.messages.append({"role": "user", "content": user_text})
+            if conv.heard(user_text):  # it has a name now
+                self.spawn(self.send_conversations())
         sentences: asyncio.Queue[str | None] = asyncio.Queue()
         speaker = asyncio.create_task(self.speak(sentences, turn))
         t0 = time.perf_counter()
@@ -498,7 +609,7 @@ class VoiceSession:
                 content, calls, chunker = "", [], SentenceChunker()
                 rounds += 1
                 try:
-                    async for msg in self.m.llm.stream(self.messages, tools.schemas(exclude), usage):
+                    async for msg in self.m.llm.stream([system, *conv.messages], tools.schemas(exclude), usage):
                         if msg.content:
                             if first_token:
                                 log.info("LLM first token %.0f ms", (time.perf_counter() - t0) * 1000)
@@ -512,13 +623,14 @@ class VoiceSession:
                 finally:
                     # Keep what was said in history, even if the user cut us off
                     if content or calls:
-                        self.messages.append({"role": "assistant", "content": content, "tool_calls": calls or None})
+                        conv.messages.append({"role": "assistant", "content": content, "tool_calls": calls or None})
+                        conv.changed()
                 for s in chunker.flush():
                     sentences.put_nowait(s)
                 if not calls:
                     break
                 used += len(calls)
-                await self.run_tools(calls, turn)
+                await self.run_tools(conv, calls, turn)
             log.info("reply in %.1f s: %d model calls, %d tool calls, %d prompt and %d output tokens",
                      time.perf_counter() - t0, rounds, used, usage.get("prompt", 0), usage.get("output", 0))
 
@@ -535,7 +647,7 @@ class VoiceSession:
         # A task may have finished while we were talking
         self.loop.call_soon(self.maybe_announce)
 
-    async def run_tools(self, calls: list, turn: int):
+    async def run_tools(self, conv: Conversation, calls: list, turn: int):
         pending = list(calls)
         try:
             while pending:
@@ -545,13 +657,14 @@ class VoiceSession:
                 result = await tools.run(name, args, session=self)
                 log.info("tool %s(%s) -> %s", name, args, result[:200])
                 await self.send(type="tool_result", turn=turn, name=name, result=result)
-                self.messages.append({"role": "tool", "tool_name": name, "content": result})
+                conv.messages.append({"role": "tool", "tool_name": name, "content": result})
                 pending.pop(0)
         finally:
             # Every tool call needs a result in history, or the next request is invalid
             for call in pending:
-                self.messages.append({"role": "tool", "tool_name": call.function.name,
+                conv.messages.append({"role": "tool", "tool_name": call.function.name,
                                       "content": json.dumps({"error": "interrupted by user"})})
+            conv.changed()
 
     async def speak(self, sentences: asyncio.Queue, turn: int):
         while (text := await sentences.get()) is not None:
@@ -637,14 +750,14 @@ class VoiceSession:
 
     def add_note(self, text: str, announce: bool = True):
         """Tells the LLM about an event on its next turn; announce=True also makes it speak up."""
-        self.notes.append(text)
         if announce:
-            self.announce = True
-            self.maybe_announce()
+            self.conv.notify(text)  # calls maybe_announce
+        else:
+            self.conv.remember(text)
 
     def maybe_announce(self):
         """Starts a response for pending notes once nobody is talking."""
-        if not self.announce or self.user_speaking:
+        if not self.conv.announce or self.user_speaking:
             return  # the user's next turn will pick the notes up
         if self.response and not self.response.done():
             return  # respond() calls us again when it ends

@@ -30,8 +30,8 @@ RUN python -m compileall -q -j 0 /usr/local/lib/python3.12/site-packages > /dev/
 RUN if [ "$BROWSER" = "true" ]; then playwright install --with-deps chromium; fi
 
 RUN useradd --create-home --uid 1000 agent \
- && mkdir -p /cache /app/media /app/voices \
- && chown agent /cache /app/media /app/voices
+ && mkdir -p /cache /app/media /app/voices /app/data \
+ && chown agent /cache /app/media /app/voices /app/data
 WORKDIR /app
 COPY backend backend
 COPY web web

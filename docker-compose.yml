@@ -18,6 +18,7 @@ x-agent: &agent
     - models:/cache          # Hugging Face downloads (speech recognition, OmniVoice)
     - media:/app/media       # generated, attached and drawn files
     - voices:/app/voices     # OmniVoice's cached voice
+    - data:/app/data         # conversations, to reopen them
   extra_hosts:
     - "host.docker.internal:host-gateway"
   restart: unless-stopped
@@ -56,3 +57,4 @@ volumes:
   models:
   media:
   voices:
+  data:
